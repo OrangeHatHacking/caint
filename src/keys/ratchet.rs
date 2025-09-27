@@ -1,8 +1,4 @@
 use crate::keys::X25519EphemeralKeyPair;
-use chacha20poly1305::{
-    aead::{Aead, KeyInit},
-    ChaChaPoly1305, Key, Nonce,
-};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use sha2::Sha256;
@@ -138,5 +134,57 @@ impl Ratchet {
         self.prev_send_chain_length = prev_send_chain_length;
         self.peer_pub_key = Some(peer_pub_key);
         self.recv_n = 0;
+    }
+
+    fn advance_send_chain(&mut self) -> [u8; 32] {
+        let chain_key = self.send_chain.expect("send_chain not initialized");
+        let (next_chain_key, message_key) = Self::kdf_chain_key(&chain_key);
+        self.send_chain = Some(next_chain_key);
+        self.send_n = self.send_n.wrapping_add(1);
+        message_key
+    }
+
+    fn advance_recv_chain(&mut self) -> [u8; 32] {
+        let chain_key = self.recv_chain.expect("recv_chain not initialized");
+        let (next_ck, mk) = Self::kdf_chain_key(&chain_key);
+        self.recv_chain = Some(next_ck);
+        self.recv_n = self.recv_n.wrapping_add(1);
+        mk
+    }
+
+    pub fn prepare_send(&mut self) -> Result<(RatchetHeader, [u8; 32]), &'static str> {
+        if self.send_chain.is_none() {
+            let peer_pub_key = match &self.peer_pub_key {
+                Some(pub_key) => pub_key.clone(),
+                None => return Err("peer_pub_key unknown: cannot derive send chain"),
+            };
+
+            // rotate DH private key (generate new StaticSecret)
+            let csprng = OsRng;
+            let new_priv_key = StaticSecret::random_from_rng(csprng);
+            let new_pub_key = PublicKey::from(&new_priv_key);
+            let new_shared_key = new_priv_key.diffie_hellman(&peer_pub_key);
+            let new_shared_key_bytes = *new_shared_key.as_bytes();
+            let (new_root, send_chain_key) =
+                Self::kdf_root_key(&self.root_key, &new_shared_key_bytes);
+
+            self.root_key = new_root;
+            self.prev_send_chain_length = self.send_n;
+            self.send_chain = Some(send_chain_key);
+            self.priv_key = new_priv_key;
+            self.pub_key = new_pub_key;
+            self.send_n = 0;
+        }
+
+        let message_key = self.advance_send_chain();
+        let msg_num = self.send_n.wrapping_sub(1);
+
+        let header = RatchetHeader {
+            dh_public_key: self.pub_key.to_bytes(),
+            prev_chain_length: self.prev_send_chain_length,
+            msg_num: msg_num,
+        };
+
+        Ok((header, message_key))
     }
 }
