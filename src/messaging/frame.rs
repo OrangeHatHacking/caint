@@ -1,38 +1,56 @@
-use serde::{Deserialize, Serialize};
+use chacha20poly1305::{
+    aead::{Aead, KeyInit},
+    ChaCha20Poly1305, Key, Nonce,
+};
+use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
+use rand::{rngs::OsRng, RngCore};
+use sha2::Sha256;
+use x25519_dalek::{x25519, EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
 
-pub const FRAME_BYTES: usize = 4096; // full frame size
-pub const HEADER_BYTES: usize = 256; // reserved header area
-pub const PAYLOAD_BYTES: usize = FRAME_BYTES - HEADER_BYTES; // encrypted payload area
+type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct FrameHeader {
-    pub version: u8,
-    pub flags: u8,
-    pub header_nonce: [u8; 12],
-    // routing info must be encrypted DO NOT place raw addresses here
-    // Header is an opaque blob to be filled by Sphinx or routing layer.
-    pub opaque: [u8; HEADER_BYTES - 14], // opaque header area; keep it opaque
+pub const MAX_HOPS: usize = 10;
+pub const HOP_PAYLOAD_LEN: usize = 32;
+pub const MAC_LEN: usize = 16;
+pub const HOP_FIELD_LEN: usize = HOP_PAYLOAD_LEN + MAC_LEN;
+pub const HEADER_LEN: usize = MAX_HOPS * HOP_FIELD_LEN;
+pub const PAYLOAD_LEN: usize = 4096; // fixed payload ciphertext length
+
+// compile time sanity check, returns zero sized array if ok
+const _: () = {
+    let _ = [0u8; (HEADER_LEN / HOP_FIELD_LEN) - (MAX_HOPS as usize)];
+};
+
+// Sphinx packet (α, β, γ) with payload appended.
+// alpha = ephemeral public key bytes (32)
+// beta = layered header blob (fixed length HEADER_LEN)
+// gamma = overall header MAC (also keep per packet MAC for tamper detection)
+// payload = fixed size AEAD ciphertext (PAYLOAD_LEN)
+
+#[derive(Clone, Debug)]
+pub struct SphinxPacket {
+    pub alpha: [u8; 32],
+    pub beta: Vec<u8>,
+    pub gamma: [u8; MAC_LEN],
+    pub payload: Vec<u8>,
 }
 
-// Payload (AEAD ciphertext + padding to PAYLOAD_BYTES)
-#[derive(Debug)]
-pub struct Frame {
-    pub header: FrameHeader,
-    pub payload: Vec<u8>, // length = PAYLOAD_BYTES (with padding)
+#[derive(Clone, Debug)]
+pub struct HopPayload {
+    pub next_hop_pub_key: [u8; 32],
+    pub opaque: Vec<u8>, // will be padded/truncated to fit HOP_PAYLOAD_LEN
 }
 
-// helper function to pack frames
-impl Frame {
-    pub fn pack(&self) -> Vec<u8> {
-        // Serialize header with bincode or a fixed layout
-        let mut output = Vec::with_capacity(FRAME_BYTES);
-        // Deterministic encoding: version, flags, header_nonce, opaque
-        output.push(self.header.version);
-        output.push(self.header.flags);
-        output.extend_from_slice(&self.header.header_nonce);
-        output.extend_from_slice(&self.header.opaque);
-        assert_eq!(self.payload.len(), PAYLOAD_BYTES);
-        output.extend_from_slice(&self.payload);
-        output
+impl HopPayload {
+    pub fn serialise_hop_payload(&self) -> [u8; HOP_PAYLOAD_LEN] {
+        let mut out = [0u8; HOP_PAYLOAD_LEN];
+        out[..32].copy_from_slice(&self.next_hop_pub_key);
+        let remaining = HOP_PAYLOAD_LEN - 32;
+        let copy = std::cmp::min(remaining, self.opaque.len());
+        if copy > 0 {
+            out[32..32 + copy].copy_from_slice(&self.opaque[..copy]);
+        }
+        out
     }
 }

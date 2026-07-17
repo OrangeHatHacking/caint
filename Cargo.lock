@@ -34,6 +34,7 @@ dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
  "hkdf",
+ "hmac",
  "rand",
  "sha2",
  "x25519-dalek",

@@ -120,6 +120,7 @@ impl Ratchet {
         self.prev_send_chain_length = 0;
     }
 
+    /// perform ratchet step on diffie-hellman keypair when msg received with new dh key
     fn dh_ratchet_on_receive(&mut self, peer_pub_key_bytes: [u8; 32], prev_send_chain_length: u32) {
         let peer_pub_key = PublicKey::from(peer_pub_key_bytes);
 
@@ -186,5 +187,59 @@ impl Ratchet {
         };
 
         Ok((header, message_key))
+    }
+
+    /// given header of recvd msg, return msg_key to decipher it
+    pub fn get_msg_key_on_receive(&mut self, header: RatchetHeader) -> Option<[u8; 32]> {
+        let peer_pub_key_bytes = header.dh_public_key;
+        let peer_pub_key_vec = peer_pub_key_bytes.to_vec();
+
+        // check skipped keys
+        if let Some(message_key) = self
+            .skipped_msg_keys
+            .remove(&(peer_pub_key_vec.clone(), header.msg_num))
+        {
+            return Some(message_key);
+        }
+
+        // check if header dh key differs from stored value
+        let header_dh_key = PublicKey::from(peer_pub_key_bytes);
+
+        let need_ratchet = match &self.peer_pub_key {
+            Some(current_pub_key) => current_pub_key.as_bytes() != header_dh_key.as_bytes(),
+            None => true,
+        };
+        if need_ratchet {
+            self.dh_ratchet_on_receive(peer_pub_key_bytes, header.prev_chain_length);
+        }
+
+        // make sure recv_chain exists
+        if self.recv_chain.is_none() {
+            return None;
+        }
+
+        // fix out of order messaging
+        let target_msg_num = header.msg_num;
+        if target_msg_num < self.recv_n {
+            // message has passed and cannot be found
+            return None;
+        }
+
+        let gap = target_msg_num.saturating_sub(self.recv_n);
+        const MAX_SKIP: u32 = 100_000;
+        if gap > 0 {
+            if gap > MAX_SKIP {
+                return None;
+            }
+            for _ in 0..gap {
+                let msg_key = self.advance_recv_chain();
+                let stored_index = self.recv_n.wrapping_sub(1);
+                self.skipped_msg_keys
+                    .insert((peer_pub_key_vec.clone(), stored_index), msg_key);
+            }
+        }
+
+        let msg_key = self.advance_recv_chain();
+        Some(msg_key)
     }
 }
