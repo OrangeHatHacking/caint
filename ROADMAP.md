@@ -115,33 +115,32 @@ initial bootstrap.
 - [ ] **Descriptor signing**: signed with Ed25519 identity key.
       Peers verify signatures before trusting.
 - [ ] **Reputation-based routing weight**: route selection prefers
-      nodes with higher delivery success and uptime. Do NOT publish
-      exact bandwidth capacity (fingerprinting risk). If capacity
-      tiers are ever needed, use coarse categories only.
+      nodes with higher delivery success and uptime. Bandwidth
+      capacity is NOT published in directories (fingerprinting
+      risk).
 
 ---
 
 ## Milestone 6: NAT Traversal & Connectivity
 
 Nodes behind NAT must be able to participate without inbound port
-forwarding.
+forwarding. All nodes MUST behave identically regardless of
+platform to prevent device-type fingerprinting.
 
-- [ ] **QUIC transport** as the primary protocol (preferred over
-      raw TLS/TCP). QUIC handles WiFi-to-cellular transitions
-      natively via connection migration.
+- [ ] **QUIC transport** as the primary protocol. Connection
+      migration handles network transitions (WiFi to cellular)
+      without full reconnection.
 - [ ] Persistent **outbound-only** connections to a rotating set
       of overlay peers (mesh-like topology)
 - [ ] Multiplexed streams over a single connection to avoid
       per-message connection overhead
 - [ ] No inbound listener required for clients (relay nodes
       still need to accept connections)
-- [ ] **Mobile-specific parameters**: reduced peer connections
-      (2-3 vs 5-10 for desktop), lower cover traffic rate when
-      on battery, with the privacy/battery trade-off transparent
-      to the user
-- [ ] **Push notification via trusted relay**: lightweight "you
-      have mail" signal (no content) to wake backgrounded mobile
-      apps for message retrieval
+- [ ] **Uniform cover traffic rate** across all nodes regardless
+      of device type. Mobile and desktop MUST NOT differ in
+      observable traffic patterns (cover rate, connection count,
+      epoch timing). Any device-specific behaviour is a
+      fingerprinting vector.
 - [ ] Nodes advertise connection list via overlay (which peers
       they can reach), not IP addresses
 

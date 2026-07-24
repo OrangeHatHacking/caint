@@ -34,14 +34,14 @@ that haven't been formalised yet.
 
 - Each node maintains a minimum `cover_rate` (dummies per second) tied to bandwidth capacity.
 - Cover frames are cryptographically identical to real frames (encrypted, MACed, routed through the mixnet).
-- **Decision**: do NOT publish exact bandwidth capacity in the epoch directory. Exact capacity values fingerprint nodes and enable de-anonymisation. Use reputation-based routing weight instead (nodes that reliably forward packets get more traffic routed through them). If capacity tiers are ever needed, use coarse categories ("low"/"medium"/"high") only.
+- **Decision**: do NOT publish bandwidth capacity in the epoch directory. Capacity values fingerprint nodes. Routing weight is derived from reputation (delivery success, uptime) instead.
 
 ### NAT Traversal & Connectivity
 
 - Clients maintain persistent **outbound** TLS connections to a rotating set of peers (mesh-like). Multiplexed streams over TLS or QUIC avoid requiring inbound port acceptance.
 - Works behind NAT: no listener required. Outbound-only connections to overlay peers.
 - Each node advertises an **overlay ID** and connection list -- never raw IPs. Published only inside signed directories or via current peers.
-- **Decision**: QUIC is the preferred transport, especially for mobile. QUIC handles WiFi-to-cellular transitions natively via connection migration. Mobile nodes connect to fewer peers (2-3 vs 5-10 for desktop) and use a lower cover traffic rate when on battery. A lightweight push notification via a trusted relay ("you have mail", no content) wakes backgrounded mobile apps. The privacy/battery trade-off MUST be transparent to the user.
+- **Decision**: QUIC is the primary transport. Connection migration handles network transitions natively. All nodes MUST behave identically regardless of platform -- differing cover traffic rates or connection counts between mobile and desktop would be a fingerprinting vector. Uniform behaviour is non-negotiable.
 
 ## Sender -> Receiver Flow
 
@@ -57,7 +57,7 @@ that haven't been formalised yet.
 
 - Route each frame along **multiple disjoint paths** to compensate for nodes going offline (k-of-n replication).
 - Forward error correction and/or parallel frames as alternatives.
-- Last-hop nodes buffer frames for a bounded time window for async pickup. **Decision**: last-hop buffering IS a centralisation risk if a recipient always uses the same relay. Mitigations: (1) sender picks a random last-hop each time; (2) recipient pre-distributes SURBs to multiple relays so messages are forwarded through the mixnet (relay never learns who recipient is); (3) short TTL (e.g., 24 hours) on buffered messages. The relay holds an opaque blob + SURB, nothing more.
+- **Decision**: last-hop buffering uses SURB-based retrieval. Recipient pre-distributes SURBs to multiple relays. When a message arrives, the relay uses the SURB to forward it through the mixnet -- the relay never learns who the recipient is. Sender picks a random last-hop each time. Short TTL (e.g., 24 hours) on buffered messages.
 
 ## Rekeying & Forward Secrecy
 
