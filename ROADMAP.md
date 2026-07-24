@@ -26,8 +26,8 @@ What exists today.
 
 ## Milestone 1: Persistent Identity & Sessions
 
-Nodes survive restarts. This is the minimum requirement before any
-network-level features make sense.
+Nodes survive restarts. Minimum requirement before network-level
+features make sense.
 
 - [ ] Save identity keypair on first run, reload on subsequent starts
 - [ ] Save and reload peer table on shutdown/startup
@@ -41,7 +41,7 @@ network-level features make sense.
 ## Milestone 2: Full X3DH Session Establishment
 
 Replace the simplified DH handshake with the proper X3DH protocol
-so sessions have full authentication and offline initiation.
+for full authentication and offline initiation.
 
 - [ ] Wire `x3dh_initiate` / `x3dh_respond` into the session flow
 - [ ] Serialize and send `InitialMessage` over the wire
@@ -50,112 +50,161 @@ so sessions have full authentication and offline initiation.
 - [ ] Fetch pre-key bundles from relays for offline recipients
 - [ ] Consume and replenish one-time pre-keys after use
 - [ ] Rotate signed pre-keys on a configurable schedule
+- [ ] Node-to-node transport keys rotate per epoch or per connection
 
 ---
 
 ## Milestone 3: Mixnet Routing (Messages Through Sphinx)
 
-Wire the Sphinx infrastructure into the actual send path. This is
-where metadata resistance begins.
+Wire Sphinx into the send path. This is where metadata resistance
+begins.
 
-- [ ] When 3+ relays known, `send_text_message` constructs a Sphinx
-      packet instead of sending DirectMessage
-- [ ] Route selection uses the existing `select_route` (random 3-5 hops)
+- [ ] When 3+ relays known, construct Sphinx packet instead of
+      DirectMessage
+- [ ] Route selection: random 3-5 hops via `select_route`
 - [ ] Sphinx packets enqueued in EpochFlusher with first-hop address
 - [ ] Epoch flusher transmits real + cover packets each epoch
 - [ ] Relay nodes forward Sphinx packets using address registry
+- [ ] All addresses in the system are **overlay IDs** (public key
+      fingerprints), never raw IPs. IP resolution happens only at
+      the connection layer via the address registry.
 - [ ] Direct TCP is fallback when fewer than 3 relays available
-- [ ] End-to-end test: 5 nodes, message through 3 relay hops, delivered
+- [ ] End-to-end test: 5 nodes, message through 3 relay hops
 
 ---
 
 ## Milestone 4: Poisson Mix Delay
 
 Without mixing delay, a global passive adversary can correlate
-packet entry and exit timing at each relay. Poisson delay is the
-standard defence.
+packet entry and exit timing at each relay.
 
 - [ ] Each relay holds each packet for a random delay drawn from
       a Poisson distribution (configurable lambda parameter)
 - [ ] Delay is per-packet, not per-batch (packets from the same
       epoch exit at different times)
-- [ ] Cover traffic (loop packets) also experiences the delay so
-      real and cover packets have identical timing profiles
+- [ ] **Delay RNG seeded by the frame's per_hop_nonce** to avoid
+      timing leaks from RNG state interaction (deterministic delay
+      derivation)
+- [ ] Cover traffic also experiences the delay so real and cover
+      packets have identical timing profiles
 - [ ] Delay parameter encoded in the Sphinx routing block (the
       `delay` field already exists, currently unused)
 - [ ] Configurable maximum delay to bound latency
+- [ ] Epoch window configurable (5-30 seconds; lower = better UX,
+      higher = better privacy; bandwidth trade-off)
 
 ---
 
 ## Milestone 5: Peer Discovery & Epoch Directory
 
-Real peer discovery so nodes find each other without manual
-configuration.
+Real peer discovery. No more manual `--peer` configuration beyond
+initial bootstrap.
 
 - [ ] **Epoch directory**: each node publishes a signed descriptor
-      containing its public key, listen address, and capabilities.
-      Descriptors are valid for one epoch and refreshed each epoch.
+      containing its overlay ID, capabilities, and optionally its
+      `bandwidth_capacity`. Descriptors valid for one epoch.
+- [ ] **Overlay IDs only**: directories MUST NOT contain raw IP
+      addresses. Routing resolution is separate from identity.
 - [ ] **Directory distribution**: descriptors propagated via gossip
-      protocol over the mix overlay, or via a DHT shared among nodes.
-- [ ] **Bootstrap from directory**: a new node fetches the directory
-      from a bootstrap peer and learns about all active nodes.
-- [ ] **Peer table auto-population**: the address registry and
-      available_relays list are populated from the directory, not
-      just from direct connections.
-- [ ] **Descriptor signing**: descriptors signed with the node's
-      Ed25519 identity key. Peers verify signatures before trusting.
+      protocol or DHT over the mix overlay.
+- [ ] **Bootstrap from directory**: new node fetches directory from
+      a bootstrap peer and learns about all active nodes.
+- [ ] **Peer table auto-population**: address registry and
+      available_relays populated from directory, not just direct
+      connections.
+- [ ] **Descriptor signing**: signed with Ed25519 identity key.
+      Peers verify signatures before trusting.
+- [ ] **Bandwidth capacity advertising**: nodes publish capacity
+      so routing can weight accordingly. (Open question: does this
+      enable de-anonymisation by fingerprinting nodes? Needs
+      analysis before enabling.)
 
 ---
 
-## Milestone 6: SURBs (Single Use Reply Blocks)
+## Milestone 6: NAT Traversal & Connectivity
 
-Allow anonymous replies without revealing the sender's network
-location.
+Nodes behind NAT must be able to participate without inbound port
+forwarding.
 
-- [ ] Sender constructs a SURB: a pre-built Sphinx header that
-      routes a reply back through chosen relays to the sender.
-- [ ] SURB included in the message payload (encrypted, so only
-      the recipient can use it).
-- [ ] Recipient uses the SURB to send a reply without knowing
-      the sender's address or route.
-- [ ] Each SURB is single-use (replay protection via tag).
-- [ ] SURB key material enables the sender to decrypt the reply.
-
----
-
-## Milestone 7: Sybil Resistance & Admission Control
-
-Prevent attackers from flooding the network with malicious nodes
-to deanonymize users.
-
-- [ ] **New node rate limiting**: freshly joined nodes have a
-      limited frame injection rate until they accumulate reputation.
-- [ ] **Proof-of-work or proof-of-stake admission**: new nodes
-      must present PoW/PoS to be accepted into the directory
-      (similar to Nym mixnet staking model).
-- [ ] **General rate limiting**: all nodes are rate-limited per
-      epoch to prevent flooding. Rate tied to epoch directory
-      registration.
-- [ ] **Relay reputation tracking**: nodes track relay reliability
-      (packet delivery success rate, uptime). Routes prefer
-      higher-reputation relays.
-- [ ] **Eclipse attack resistance**: route selection algorithm
-      should avoid choosing too many relays from the same
-      network/ASN.
+- [ ] Persistent **outbound-only** TLS/QUIC connections to a
+      rotating set of overlay peers (mesh-like topology)
+- [ ] Multiplexed streams over a single connection to avoid
+      per-message connection overhead
+- [ ] No inbound listener required for clients (relay nodes
+      still need to accept connections)
+- [ ] QUIC with connection migration for mobile (investigate
+      bandwidth/battery impact)
+- [ ] Nodes advertise connection list via overlay (which peers
+      they can reach), not IP addresses
 
 ---
 
-## Milestone 8: Multi-Peer & Group Features
+## Milestone 7: SURBs (Single Use Reply Blocks)
 
-- [ ] Peer addressing by ID or alias (send to specific peer)
-- [ ] Contact list management (add, remove, name peers)
+Anonymous replies without revealing the sender's network location.
+
+- [ ] Sender constructs a SURB: pre-built Sphinx header routing
+      a reply back through chosen relays to the sender
+- [ ] SURB included in message payload (encrypted; only recipient
+      can use it)
+- [ ] Recipient uses SURB to reply without knowing sender's
+      address or route
+- [ ] Each SURB is single-use (replay protection via tag)
+- [ ] SURB key material enables sender to decrypt the reply
+- [ ] **Mix node keys in a SURB are only valid for the epoch in
+      which the SURB was created** (prevents stale-SURB attacks)
+- [ ] **ACKs sent as normal frames through mix overlay using
+      SURBs** -- requester's location never disclosed
+
+---
+
+## Milestone 8: Epoch Redundancy & Reliability
+
+Compensate for nodes going offline mid-route.
+
+- [ ] Route each frame along **multiple disjoint paths** (k-of-n
+      replication) so delivery succeeds if some relays drop
+- [ ] Forward error correction as alternative or supplement to
+      full path replication
+- [ ] Last-hop nodes buffer frames for a bounded time window for
+      **async pickup** when recipient is offline
+- [ ] Evaluate whether last-hop buffering creates a centralisation
+      point; explore alternatives (e.g., multiple last-hops,
+      SURB-based mailbox retrieval)
+
+---
+
+## Milestone 9: Sybil Resistance & Admission Control
+
+Prevent attackers from flooding the network with malicious nodes.
+
+- [ ] **New node rate limiting**: limited frame injection until
+      reputation accumulated or PoW/PoS presented
+- [ ] **Proof-of-work or proof-of-stake admission** (Nym model)
+- [ ] **General rate limiting**: all nodes rate-limited per epoch,
+      rate tied to directory registration
+- [ ] **Relay reputation tracking**: delivery success rate, uptime;
+      routes prefer higher-reputation relays
+- [ ] **Eclipse attack resistance**: route selection avoids too
+      many relays from the same network/ASN
+- [ ] **Social trust graph** as supplementary Sybil deterrent
+      (effectiveness in a mixnet with cover traffic is unclear --
+      needs evaluation)
+
+---
+
+## Milestone 10: Multi-Peer & Group Features
+
+- [ ] Peer addressing by ID or alias
+- [ ] Contact list management (add, remove, name)
 - [ ] Group messaging (sender-keys or pairwise fanout)
 - [ ] Message delivery receipts (via SURBs)
-- [ ] Message fragmentation for payloads exceeding frame limit
+- [ ] Message fragmentation / splitting for payloads exceeding
+      the 4096-byte frame limit
 
 ---
 
-## Milestone 9: Hardening & Audit
+## Milestone 11: Hardening & Audit
 
 - [ ] Remove all `.expect()` / `.unwrap()` in non-test code
 - [ ] Zeroize audit: every secret properly cleared on drop
@@ -164,13 +213,14 @@ to deanonymize users.
 - [ ] Graceful shutdown with full state persistence
 - [ ] Sphinx payload encryption upgraded from XOR-based to
       proper SPRP (Lioness wide-block cipher)
+- [ ] Evaluate HPKE for key encapsulation on top of Sphinx + AEAD
 - [ ] Formal security review / audit
 - [ ] Fuzz testing of wire protocol parser
 - [ ] Memory safety audit (no unsafe, verify via cargo-deny)
 
 ---
 
-## Milestone 10: User Experience
+## Milestone 12: User Experience
 
 - [ ] TUI chat interface (ratatui or similar)
 - [ ] File transfer over mixnet
@@ -182,17 +232,16 @@ to deanonymize users.
 
 ## Design Principles
 
-Key principles:
-
 1. **Security over convenience.** Every trade-off favours security.
 2. **No custom crypto.** Audited libraries only.
-3. **Metadata resistance is not optional.** It is an architectural
-   requirement, not an afterthought.
+3. **Metadata resistance is not optional.** Architectural requirement.
 4. **Forward secrecy is mandatory.** Every message key is ephemeral.
 5. **No central point of failure or trust.**
-6. **Secret material is zeroized.** Keys never persist in memory
+6. **Overlay identity only.** Raw IPs never appear in directories,
+   announcements, or routing. Resolution is a separate layer.
+7. **Secret material is zeroized.** Keys never persist in memory
    longer than needed.
-7. **Simplicity.** The simplest correct solution is preferred.
+8. **Simplicity.** The simplest correct solution is preferred.
 
 ---
 
