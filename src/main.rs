@@ -1,37 +1,58 @@
-mod crypto;
-mod keys;
-mod messaging;
-mod storage;
-mod transport;
+use caint::keys::identity::IdentityKeyPair;
+use caint::keys::prekey::{generate_one_time_prekeys, PreKeyBundle, SignedPreKey};
+use caint::keys::ratchet::Ratchet;
+use caint::keys::x3dh::{x3dh_initiate, x3dh_respond};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    println!("=== Caint bootstrap demo ===");
+fn main() {
+    println!("=== Caint E2EE Messaging System ===\n");
 
-    // 1. Initialize keystore with a passphrase
-    let passphrase = "super-secret-passphrase";
-    let mut ks = keys::key_store::KeyStore::open("keystore.db", passphrase)?;
-    let identity = ks.get_or_create_identity()?;
-    println!("Loaded identity public key: {:x?}", identity.public);
+    // 1. Generate identities
+    let alice = IdentityKeyPair::generate();
+    let bob = IdentityKeyPair::generate();
+    println!("[OK] Generated identity keys for Alice and Bob");
 
-    // 2. Build a frame
-    let payload = b"Hello, secure world!";
-    let frame = messaging::frame::Frame::new(payload.to_vec());
-    println!("Built frame of size {}", frame.data.len());
+    // 2. Bob publishes pre-key bundle
+    let bob_spk = SignedPreKey::generate(&bob, 1);
+    let bob_opks = generate_one_time_prekeys(1, 10);
+    let bob_bundle = PreKeyBundle::build(&bob, &bob_spk, Some(&bob_opks[0]));
+    println!("[OK] Bob's pre-key bundle created");
 
-    // 3. Encrypt the frame using our crypto layer
-    let sym_key = keys::kdf::derive_key_from_passphrase(passphrase)?;
-    let ciphertext = crypto::aead::encrypt_message(&sym_key, &frame.data)?;
-    let plaintext = crypto::aead::decrypt_message(&sym_key, &ciphertext)?;
-    assert_eq!(plaintext, frame.data);
+    // 3. Alice initiates X3DH
+    let (alice_sk, initial_msg) =
+        x3dh_initiate(&alice, &bob_bundle).expect("X3DH initiation failed");
+    println!("[OK] Alice performed X3DH key agreement");
 
-    // 4. Store it encrypted in sled
-    let mut db = storage::encrypted_db::EncryptedDb::open("storage.db", &sym_key)?;
-    db.put(b"last_frame", &plaintext)?;
-    println!("Stored frame securely in encrypted DB.");
+    // 4. Bob responds to X3DH
+    let bob_sk = x3dh_respond(&bob, &bob_spk, Some(&bob_opks[0]), &initial_msg)
+        .expect("X3DH response failed");
+    assert_eq!(alice_sk, bob_sk, "Shared secrets must match");
+    println!("[OK] Bob derived matching shared secret");
 
-    // 5. (later) send frame over Tor transport
-    // transport::arti_transport::send_frame(&frame).await?;
+    // 5. Initialize Double Ratchet
+    let mut alice_ratchet = Ratchet::init_initiator(alice_sk, &bob_spk.public);
+    let mut bob_ratchet = Ratchet::init_responder(bob_sk, {
+        // In real code, bob would pass his SPK private key
+        // For demo, we create a new ratchet with the shared secret
+        x25519_dalek::StaticSecret::from(bob_spk.private_key().to_bytes())
+    });
+    println!("[OK] Double Ratchet initialized for both parties");
 
-    Ok(())
+    // 6. Exchange a message
+    let ad = b"caint_demo";
+    let (header, ciphertext) = alice_ratchet.encrypt(b"Hello, Bob!", ad);
+    let plaintext = bob_ratchet
+        .decrypt(&header, &ciphertext, ad)
+        .expect("Decryption failed");
+    assert_eq!(plaintext, b"Hello, Bob!");
+    println!("[OK] Alice -> Bob: \"Hello, Bob!\" (encrypted & decrypted)");
+
+    // 7. Bob replies
+    let (header2, ct2) = bob_ratchet.encrypt(b"Hi Alice!", ad);
+    let pt2 = alice_ratchet
+        .decrypt(&header2, &ct2, ad)
+        .expect("Decryption failed");
+    assert_eq!(pt2, b"Hi Alice!");
+    println!("[OK] Bob -> Alice: \"Hi Alice!\" (encrypted & decrypted)");
+
+    println!("\n=== All checks passed! ===");
 }
