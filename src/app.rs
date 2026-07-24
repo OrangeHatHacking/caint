@@ -38,13 +38,44 @@ pub struct App {
 }
 
 impl App {
-    /// Initialize the application.
+    /// Initialize the application. Loads identity from disk or generates a new one.
     pub fn new(config: AppConfig) -> Self {
-        let identity = IdentityKeyPair::generate();
-        let storage = Arc::new(Storage::new(
-            &identity.x25519_public_bytes(),
-            Path::new(&config.storage_path),
-        ));
+        let data_path = Path::new(&config.storage_path);
+        std::fs::create_dir_all(data_path).ok();
+
+        let identity = match crate::storage::Storage::load_identity_keypair(data_path) {
+            Ok(Some(bytes)) => match IdentityKeyPair::from_bytes(&bytes) {
+                Ok(id) => {
+                    info!("Loaded identity from disk");
+                    id
+                }
+                Err(e) => {
+                    warn!(error = %e, "Corrupted identity file, generating new identity");
+                    let id = IdentityKeyPair::generate();
+                    let _ =
+                        crate::storage::Storage::save_identity_keypair(data_path, &id.to_bytes());
+                    id
+                }
+            },
+            Ok(None) => {
+                let id = IdentityKeyPair::generate();
+                if let Err(e) =
+                    crate::storage::Storage::save_identity_keypair(data_path, &id.to_bytes())
+                {
+                    warn!(error = %e, "Failed to save identity");
+                }
+                info!("Generated and saved new identity");
+                id
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to load identity, generating new");
+                let id = IdentityKeyPair::generate();
+                let _ = crate::storage::Storage::save_identity_keypair(data_path, &id.to_bytes());
+                id
+            }
+        };
+
+        let storage = Arc::new(Storage::new(&identity.x25519_public_bytes(), data_path));
         let identity = Arc::new(identity);
         let spk = Arc::new(SignedPreKey::generate(&identity, 1));
         let _opks = generate_one_time_prekeys(1, 100);

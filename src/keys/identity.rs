@@ -71,6 +71,47 @@ impl IdentityKeyPair {
         *self.x25519_private.diffie_hellman(peer_public).as_bytes()
     }
 
+    /// Serialize to 128 bytes: ed25519_signing(32) || ed25519_public(32) || x25519_private(32) || x25519_public(32)
+    pub fn to_bytes(&self) -> [u8; 128] {
+        let mut out = [0u8; 128];
+        out[..32].copy_from_slice(&self.ed25519_signing.to_bytes());
+        out[32..64].copy_from_slice(&self.ed25519_public.to_bytes());
+        out[64..96].copy_from_slice(&self.x25519_private.to_bytes());
+        out[96..128].copy_from_slice(&self.x25519_public.to_bytes());
+        out
+    }
+
+    /// Deserialize from 128 bytes.
+    pub fn from_bytes(bytes: &[u8; 128]) -> Result<Self, &'static str> {
+        let ed25519_signing = SigningKey::from_bytes(bytes[..32].try_into().unwrap());
+        let ed25519_public = VerifyingKey::from_bytes(bytes[32..64].try_into().unwrap())
+            .map_err(|_| "invalid ed25519 public key")?;
+
+        // Verify the public key matches the signing key
+        if ed25519_signing.verifying_key() != ed25519_public {
+            return Err("ed25519 public key does not match signing key");
+        }
+
+        let mut x_priv_bytes = [0u8; 32];
+        x_priv_bytes.copy_from_slice(&bytes[64..96]);
+        let x25519_private = StaticSecret::from(x_priv_bytes);
+        let mut x_pub_bytes = [0u8; 32];
+        x_pub_bytes.copy_from_slice(&bytes[96..128]);
+        let x25519_public = X25519PublicKey::from(x_pub_bytes);
+
+        // Verify x25519 public matches private
+        if X25519PublicKey::from(&x25519_private) != x25519_public {
+            return Err("x25519 public key does not match private key");
+        }
+
+        Ok(IdentityKeyPair {
+            ed25519_signing,
+            ed25519_public,
+            x25519_private,
+            x25519_public,
+        })
+    }
+
     /// Get reference to the Ed25519 signing key (for serialization).
     pub fn ed25519_signing_key(&self) -> &SigningKey {
         &self.ed25519_signing
@@ -154,6 +195,34 @@ mod tests {
         let b = IdentityKeyPair::generate();
         assert_ne!(a.ed25519_public_bytes(), b.ed25519_public_bytes());
         assert_ne!(a.x25519_public_bytes(), b.x25519_public_bytes());
+    }
+
+    #[test]
+    fn test_identity_serialization_roundtrip() {
+        let original = IdentityKeyPair::generate();
+        let bytes = original.to_bytes();
+        let restored = IdentityKeyPair::from_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            original.ed25519_public_bytes(),
+            restored.ed25519_public_bytes()
+        );
+        assert_eq!(
+            original.x25519_public_bytes(),
+            restored.x25519_public_bytes()
+        );
+
+        // Same signatures
+        let msg = b"test";
+        let sig = original.sign(msg);
+        assert!(restored.verify(msg, &sig));
+
+        // Same DH
+        let peer = IdentityKeyPair::generate();
+        assert_eq!(
+            original.x25519_dh(peer.x25519_public()),
+            restored.x25519_dh(peer.x25519_public())
+        );
     }
 
     #[test]

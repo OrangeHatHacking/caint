@@ -111,6 +111,82 @@ impl Storage {
         self.load_encrypted("identity.enc")
     }
 
+    /// Save an IdentityKeyPair with self-contained encryption.
+    ///
+    /// File format: x25519_pub(32) || nonce(12) || encrypted(96) || tag(16)
+    /// Encryption key: HKDF(salt="caint_identity", ikm=x25519_pub, info="identity_encryption")
+    pub fn save_identity_keypair(
+        base_path: &Path,
+        keypair_bytes: &[u8; 128],
+    ) -> Result<(), StorageError> {
+        let x25519_pub = &keypair_bytes[96..128];
+        let private_bytes = &keypair_bytes[..96]; // ed25519_signing + ed25519_public + x25519_private
+
+        // Derive encryption key from the public key
+        let hk = Hkdf::<Sha256>::new(Some(b"caint_identity"), x25519_pub);
+        let mut enc_key = [0u8; 32];
+        hk.expand(b"identity_encryption", &mut enc_key)
+            .expect("HKDF");
+
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let key = Key::from_slice(&enc_key);
+        let cipher = ChaCha20Poly1305::new(key);
+        let ciphertext = cipher
+            .encrypt(nonce, private_bytes)
+            .map_err(|_| StorageError::CorruptedData)?;
+
+        let path = base_path.join("identity.enc");
+        let mut out = Vec::with_capacity(32 + 12 + ciphertext.len());
+        out.extend_from_slice(x25519_pub);
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ciphertext);
+        fs::write(&path, &out)?;
+        Ok(())
+    }
+
+    /// Load an IdentityKeyPair from self-contained encrypted file.
+    ///
+    /// Returns the 128-byte keypair, or None if file doesn't exist.
+    pub fn load_identity_keypair(base_path: &Path) -> Result<Option<[u8; 128]>, StorageError> {
+        let path = base_path.join("identity.enc");
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let data = fs::read(&path)?;
+        // Minimum: x25519_pub(32) + nonce(12) + ciphertext(96) + tag(16) = 156
+        if data.len() < 156 {
+            return Err(StorageError::CorruptedData);
+        }
+
+        let x25519_pub = &data[..32];
+        let nonce_bytes = &data[32..44];
+        let ciphertext = &data[44..];
+
+        let hk = Hkdf::<Sha256>::new(Some(b"caint_identity"), x25519_pub);
+        let mut enc_key = [0u8; 32];
+        hk.expand(b"identity_encryption", &mut enc_key)
+            .expect("HKDF");
+
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let key = Key::from_slice(&enc_key);
+        let cipher = ChaCha20Poly1305::new(key);
+        let private_bytes = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| StorageError::DecryptionFailed)?;
+
+        if private_bytes.len() != 96 {
+            return Err(StorageError::CorruptedData);
+        }
+
+        let mut out = [0u8; 128];
+        out[..96].copy_from_slice(&private_bytes);
+        out[96..128].copy_from_slice(x25519_pub);
+        Ok(Some(out))
+    }
+
     /// Save ratchet state bytes for a specific peer.
     pub fn save_ratchet(&self, peer_id: &[u8; 32], data: &[u8]) -> Result<(), StorageError> {
         let filename = format!("{}.ratchet", hex_encode(peer_id));
@@ -313,9 +389,39 @@ mod tests {
     fn test_corrupted_file_returns_error() {
         let dir = temp_dir();
         let storage = Storage::with_key([1u8; 32], &dir);
-        // Write corrupted data to identity file
         fs::write(dir.join("identity.enc"), b"corrupted").unwrap();
         let result = storage.load_identity();
+        assert!(result.is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_save_load_identity_keypair_roundtrip() {
+        use crate::keys::identity::IdentityKeyPair;
+        let dir = temp_dir();
+        let original = IdentityKeyPair::generate();
+        let bytes = original.to_bytes();
+
+        Storage::save_identity_keypair(&dir, &bytes).unwrap();
+        let loaded = Storage::load_identity_keypair(&dir).unwrap().unwrap();
+        let restored = IdentityKeyPair::from_bytes(&loaded).unwrap();
+
+        assert_eq!(
+            original.ed25519_public_bytes(),
+            restored.ed25519_public_bytes()
+        );
+        assert_eq!(
+            original.x25519_public_bytes(),
+            restored.x25519_public_bytes()
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_corrupted_identity_keypair_file_returns_error() {
+        let dir = temp_dir();
+        fs::write(dir.join("identity.enc"), b"not valid data").unwrap();
+        let result = Storage::load_identity_keypair(&dir);
         assert!(result.is_err());
         fs::remove_dir_all(&dir).ok();
     }
