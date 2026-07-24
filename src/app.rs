@@ -38,44 +38,57 @@ pub struct App {
 }
 
 impl App {
-    /// Initialize the application. Loads identity from disk or generates a new one.
-    pub fn new(config: AppConfig) -> Self {
+    /// Initialize the application. Passphrase is mandatory.
+    pub fn new(config: AppConfig, passphrase: &str) -> Self {
         let data_path = Path::new(&config.storage_path);
         std::fs::create_dir_all(data_path).ok();
+        let pp = passphrase.as_bytes();
 
-        let identity = match crate::storage::Storage::load_identity_keypair(data_path) {
+        let identity = match Storage::load_identity_keypair(data_path, pp) {
             Ok(Some(bytes)) => match IdentityKeyPair::from_bytes(&bytes) {
                 Ok(id) => {
                     info!("Loaded identity from disk");
                     id
                 }
                 Err(e) => {
-                    warn!(error = %e, "Corrupted identity file, generating new identity");
+                    warn!(error = %e, "Corrupted identity, generating new");
                     let id = IdentityKeyPair::generate();
-                    let _ =
-                        crate::storage::Storage::save_identity_keypair(data_path, &id.to_bytes());
+                    let _ = Storage::save_identity_keypair(data_path, &id.to_bytes(), pp);
                     id
                 }
             },
             Ok(None) => {
                 let id = IdentityKeyPair::generate();
-                if let Err(e) =
-                    crate::storage::Storage::save_identity_keypair(data_path, &id.to_bytes())
-                {
+                if let Err(e) = Storage::save_identity_keypair(data_path, &id.to_bytes(), pp) {
                     warn!(error = %e, "Failed to save identity");
                 }
                 info!("Generated and saved new identity");
                 id
             }
+            Err(crate::storage::StorageError::DecryptionFailed) => {
+                eprintln!("Error: Wrong passphrase or corrupted identity file.");
+                std::process::exit(1);
+            }
             Err(e) => {
                 warn!(error = %e, "Failed to load identity, generating new");
                 let id = IdentityKeyPair::generate();
-                let _ = crate::storage::Storage::save_identity_keypair(data_path, &id.to_bytes());
+                let _ = Storage::save_identity_keypair(data_path, &id.to_bytes(), pp);
                 id
             }
         };
 
-        let storage = Arc::new(Storage::new(&identity.x25519_public_bytes(), data_path));
+        // Derive master key for all storage from passphrase + identity salt
+        // For ongoing storage (ratchets, messages), derive from the identity file's salt
+        // For simplicity, use identity public key as a stable salt for the session master key
+        let session_salt: [u8; 16] = {
+            let mut s = [0u8; 16];
+            s.copy_from_slice(&identity.x25519_public_bytes()[..16]);
+            s
+        };
+        let master_key = crate::storage::MasterKey::derive_default(pp, &session_salt)
+            .expect("Argon2 key derivation failed");
+
+        let storage = Arc::new(Storage::new(&master_key, data_path));
         let identity = Arc::new(identity);
         let spk = Arc::new(SignedPreKey::generate(&identity, 1));
         let _opks = generate_one_time_prekeys(1, 100);

@@ -18,19 +18,25 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Create a new Storage instance.
-    ///
-    /// Derives a storage encryption key from the identity private key bytes
-    /// via HKDF-SHA256 with salt="caint_storage" and info="storage_encryption".
-    pub fn new(identity_key_bytes: &[u8; 32], base_path: &Path) -> Self {
+    /// Create from a passphrase-derived MasterKey.
+    /// Storage key is derived as a subkey for general storage operations.
+    pub fn new(master_key: &crate::storage::master_key::MasterKey, base_path: &Path) -> Self {
+        let storage_key = master_key.derive_subkey("storage");
+        fs::create_dir_all(base_path).ok();
+        Storage {
+            storage_key,
+            base_path: base_path.to_path_buf(),
+        }
+    }
+
+    /// Create from raw identity bytes (DEPRECATED -- non-compliant with constitution).
+    /// Kept temporarily for migration from old format.
+    pub fn new_legacy(identity_key_bytes: &[u8; 32], base_path: &Path) -> Self {
         let hk = Hkdf::<Sha256>::new(Some(b"caint_storage"), identity_key_bytes);
         let mut storage_key = [0u8; 32];
         hk.expand(b"storage_encryption", &mut storage_key)
             .expect("HKDF expand for 32 bytes");
-
-        // Ensure base directory exists
         fs::create_dir_all(base_path).ok();
-
         Storage {
             storage_key,
             base_path: base_path.to_path_buf(),
@@ -111,22 +117,25 @@ impl Storage {
         self.load_encrypted("identity.enc")
     }
 
-    /// Save an IdentityKeyPair with self-contained encryption.
+    /// Save identity with Argon2id passphrase encryption.
     ///
-    /// File format: x25519_pub(32) || nonce(12) || encrypted(96) || tag(16)
-    /// Encryption key: HKDF(salt="caint_identity", ikm=x25519_pub, info="identity_encryption")
+    /// Format: version(1) || salt(16) || m_cost(4) || t_cost(4) || p_cost(4) || nonce(12) || ciphertext(128+16)
     pub fn save_identity_keypair(
         base_path: &Path,
         keypair_bytes: &[u8; 128],
+        passphrase: &[u8],
     ) -> Result<(), StorageError> {
-        let x25519_pub = &keypair_bytes[96..128];
-        let private_bytes = &keypair_bytes[..96]; // ed25519_signing + ed25519_public + x25519_private
+        use crate::storage::master_key::{MasterKey, ARGON2_M_COST, ARGON2_P_COST, ARGON2_T_COST};
 
-        // Derive encryption key from the public key
-        let hk = Hkdf::<Sha256>::new(Some(b"caint_identity"), x25519_pub);
-        let mut enc_key = [0u8; 32];
-        hk.expand(b"identity_encryption", &mut enc_key)
-            .expect("HKDF");
+        let salt = MasterKey::generate_salt();
+        let mk = MasterKey::derive(
+            passphrase,
+            &salt,
+            ARGON2_M_COST,
+            ARGON2_T_COST,
+            ARGON2_P_COST,
+        )?;
+        let enc_key = mk.derive_subkey("identity");
 
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
@@ -134,57 +143,117 @@ impl Storage {
         let key = Key::from_slice(&enc_key);
         let cipher = ChaCha20Poly1305::new(key);
         let ciphertext = cipher
-            .encrypt(nonce, private_bytes)
+            .encrypt(nonce, keypair_bytes.as_slice())
             .map_err(|_| StorageError::CorruptedData)?;
 
         let path = base_path.join("identity.enc");
-        let mut out = Vec::with_capacity(32 + 12 + ciphertext.len());
-        out.extend_from_slice(x25519_pub);
+        let mut out = Vec::with_capacity(1 + 16 + 12 + 12 + ciphertext.len());
+        out.push(0x01);
+        out.extend_from_slice(&salt);
+        out.extend_from_slice(&ARGON2_M_COST.to_be_bytes());
+        out.extend_from_slice(&ARGON2_T_COST.to_be_bytes());
+        out.extend_from_slice(&ARGON2_P_COST.to_be_bytes());
         out.extend_from_slice(&nonce_bytes);
         out.extend_from_slice(&ciphertext);
+
         fs::write(&path, &out)?;
+        // Restrictive permissions handled by the OS-level encryption
+        // and the passphrase requirement. No platform-specific permission
+        // calls -- the file is opaque ciphertext without the passphrase.
         Ok(())
     }
 
-    /// Load an IdentityKeyPair from self-contained encrypted file.
-    ///
-    /// Returns the 128-byte keypair, or None if file doesn't exist.
-    pub fn load_identity_keypair(base_path: &Path) -> Result<Option<[u8; 128]>, StorageError> {
+    /// Load identity from passphrase-encrypted file.
+    pub fn load_identity_keypair(
+        base_path: &Path,
+        passphrase: &[u8],
+    ) -> Result<Option<[u8; 128]>, StorageError> {
+        use crate::storage::master_key::MasterKey;
+
         let path = base_path.join("identity.enc");
         if !path.exists() {
             return Ok(None);
         }
 
         let data = fs::read(&path)?;
-        // Minimum: x25519_pub(32) + nonce(12) + ciphertext(96) + tag(16) = 156
-        if data.len() < 156 {
+        if data.is_empty() {
+            return Err(StorageError::CorruptedData);
+        }
+
+        // Detect old format (no version byte 0x01)
+        if data[0] != 0x01 {
+            return Self::migrate_old_identity(base_path, &data, passphrase);
+        }
+
+        // version(1) + salt(16) + m(4) + t(4) + p(4) + nonce(12) + ct(128+16)
+        if data.len() < 1 + 16 + 12 + 12 + 128 + 16 {
+            return Err(StorageError::CorruptedData);
+        }
+
+        let salt: [u8; 16] = data[1..17].try_into().unwrap();
+        let m_cost = u32::from_be_bytes(data[17..21].try_into().unwrap());
+        let t_cost = u32::from_be_bytes(data[21..25].try_into().unwrap());
+        let p_cost = u32::from_be_bytes(data[25..29].try_into().unwrap());
+        let nonce_bytes = &data[29..41];
+        let ciphertext = &data[41..];
+
+        let mk = MasterKey::derive(passphrase, &salt, m_cost, t_cost, p_cost)?;
+        let enc_key = mk.derive_subkey("identity");
+
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let key = Key::from_slice(&enc_key);
+        let cipher = ChaCha20Poly1305::new(key);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| StorageError::DecryptionFailed)?;
+
+        if plaintext.len() != 128 {
+            return Err(StorageError::CorruptedData);
+        }
+
+        let mut out = [0u8; 128];
+        out.copy_from_slice(&plaintext);
+        Ok(Some(out))
+    }
+
+    /// Migrate old-format identity file to passphrase-encrypted format.
+    fn migrate_old_identity(
+        base_path: &Path,
+        data: &[u8],
+        passphrase: &[u8],
+    ) -> Result<Option<[u8; 128]>, StorageError> {
+        if data.len() < 32 + 12 + 96 + 16 {
             return Err(StorageError::CorruptedData);
         }
 
         let x25519_pub = &data[..32];
         let nonce_bytes = &data[32..44];
-        let ciphertext = &data[44..];
+        let old_ciphertext = &data[44..];
 
         let hk = Hkdf::<Sha256>::new(Some(b"caint_identity"), x25519_pub);
-        let mut enc_key = [0u8; 32];
-        hk.expand(b"identity_encryption", &mut enc_key)
+        let mut old_key = [0u8; 32];
+        hk.expand(b"identity_encryption", &mut old_key)
             .expect("HKDF");
 
         let nonce = Nonce::from_slice(nonce_bytes);
-        let key = Key::from_slice(&enc_key);
+        let key = Key::from_slice(&old_key);
         let cipher = ChaCha20Poly1305::new(key);
         let private_bytes = cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(nonce, old_ciphertext)
             .map_err(|_| StorageError::DecryptionFailed)?;
 
         if private_bytes.len() != 96 {
             return Err(StorageError::CorruptedData);
         }
 
-        let mut out = [0u8; 128];
-        out[..96].copy_from_slice(&private_bytes);
-        out[96..128].copy_from_slice(x25519_pub);
-        Ok(Some(out))
+        let mut keypair = [0u8; 128];
+        keypair[..96].copy_from_slice(&private_bytes);
+        keypair[96..128].copy_from_slice(x25519_pub);
+
+        Self::save_identity_keypair(base_path, &keypair, passphrase)?;
+        tracing::info!("Migrated identity to passphrase-encrypted format");
+
+        Ok(Some(keypair))
     }
 
     /// Save ratchet state bytes for a specific peer.
@@ -273,11 +342,12 @@ mod tests {
 
     #[test]
     fn test_derive_storage_key() {
-        let identity_bytes = [42u8; 32];
+        use crate::storage::master_key::MasterKey;
         let dir = temp_dir();
-        let storage = Storage::new(&identity_bytes, &dir);
+        let salt = [42u8; 16];
+        let mk = MasterKey::derive(b"test", &salt, 256, 1, 1).unwrap(); // low params for test speed
+        let storage = Storage::new(&mk, &dir);
         assert_ne!(storage.storage_key, [0u8; 32]);
-        assert_ne!(storage.storage_key, identity_bytes);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -399,11 +469,12 @@ mod tests {
     fn test_save_load_identity_keypair_roundtrip() {
         use crate::keys::identity::IdentityKeyPair;
         let dir = temp_dir();
+        let pw = b"testpassphrase";
         let original = IdentityKeyPair::generate();
         let bytes = original.to_bytes();
 
-        Storage::save_identity_keypair(&dir, &bytes).unwrap();
-        let loaded = Storage::load_identity_keypair(&dir).unwrap().unwrap();
+        Storage::save_identity_keypair(&dir, &bytes, pw).unwrap();
+        let loaded = Storage::load_identity_keypair(&dir, pw).unwrap().unwrap();
         let restored = IdentityKeyPair::from_bytes(&loaded).unwrap();
 
         assert_eq!(
@@ -418,10 +489,40 @@ mod tests {
     }
 
     #[test]
+    fn test_wrong_passphrase_fails() {
+        use crate::keys::identity::IdentityKeyPair;
+        let dir = temp_dir();
+        let original = IdentityKeyPair::generate();
+        Storage::save_identity_keypair(&dir, &original.to_bytes(), b"correct").unwrap();
+        let result = Storage::load_identity_keypair(&dir, b"wrong");
+        assert!(matches!(result, Err(StorageError::DecryptionFailed)));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_identity_file_no_cleartext_keys() {
+        use crate::keys::identity::IdentityKeyPair;
+        let dir = temp_dir();
+        let original = IdentityKeyPair::generate();
+        let keypair_bytes = original.to_bytes();
+        Storage::save_identity_keypair(&dir, &keypair_bytes, b"pw").unwrap();
+
+        let file_data = fs::read(dir.join("identity.enc")).unwrap();
+        // No 32-byte contiguous slice from the keypair should appear in the file
+        for chunk in keypair_bytes.chunks(32) {
+            assert!(
+                !file_data.windows(32).any(|w| w == chunk),
+                "Cleartext key material found in identity file"
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_corrupted_identity_keypair_file_returns_error() {
         let dir = temp_dir();
         fs::write(dir.join("identity.enc"), b"not valid data").unwrap();
-        let result = Storage::load_identity_keypair(&dir);
+        let result = Storage::load_identity_keypair(&dir, b"pw");
         assert!(result.is_err());
         fs::remove_dir_all(&dir).ok();
     }

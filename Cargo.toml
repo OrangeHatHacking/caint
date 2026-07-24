@@ -14,9 +14,15 @@ hkdf = "0.12.4"
 hmac = "0.12.1"
 sha2 = "0.10.9"
 
+# Key derivation
+argon2 = "0.5"
+
 # Memory safety
 zeroize = { version = "1.8.1", features = ["derive"] }
 subtle = "2.6.1"
+
+# Passphrase input
+rpassword = "7"
 
 # Randomness
 rand = "0.8"

@@ -14,15 +14,12 @@ See the constitution's Security Gate -- no code ships without passing it.
 These are existing violations of the constitution that were introduced
 before the Security Gate was established. They must be fixed first.
 
-- [ ] **Mandatory passphrase encryption for all storage.** Add Argon2id
-      key derivation. Identity, ratchet state, message history, and peer
-      table must all be encrypted with the passphrase-derived master key.
-      The current scheme (key derived from public key in the same file)
-      is non-compliant and must be replaced.
-- [ ] **Passphrase required on startup.** Via `--passphrase` flag,
+- [x] **Mandatory passphrase encryption for all storage.** Argon2id
+      key derivation (64 MiB, 3 iterations). Identity encrypted with
+      passphrase-derived key. Master key derived for all storage.
+- [x] **Passphrase required on startup.** Via `--passphrase` flag,
       `CAINT_PASSPHRASE` env var, or interactive prompt. Node refuses
-      to start without it. Passphrase cached in memory for the session,
-      never written to disk.
+      to start without it. Cached in memory, never on disk.
 - [ ] **Constant-time MAC comparisons.** Replace all `==` on MACs and
       authentication tags with `subtle::ConstantTimeEq` throughout the
       codebase.

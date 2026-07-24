@@ -1,5 +1,7 @@
 pub mod encrypted;
+pub mod master_key;
 pub use encrypted::Storage;
+pub use master_key::MasterKey;
 
 use std::fmt;
 
