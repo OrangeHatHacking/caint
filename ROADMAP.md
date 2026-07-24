@@ -4,6 +4,45 @@ This document tracks the path from working E2EE prototype to production
 decentralized mixnet messenger. Items are ordered by dependency and
 priority. Each milestone builds on the previous.
 
+**Security is not a milestone. It is a constraint on every milestone.**
+See the constitution's Security Gate -- no code ships without passing it.
+
+---
+
+## Security Debt (MUST resolve before further features)
+
+These are existing violations of the constitution that were introduced
+before the Security Gate was established. They must be fixed first.
+
+- [ ] **Mandatory passphrase encryption for all storage.** Add Argon2id
+      key derivation. Identity, ratchet state, message history, and peer
+      table must all be encrypted with the passphrase-derived master key.
+      The current scheme (key derived from public key in the same file)
+      is non-compliant and must be replaced.
+- [ ] **Passphrase required on startup.** Via `--passphrase` flag,
+      `CAINT_PASSPHRASE` env var, or interactive prompt. Node refuses
+      to start without it. Passphrase cached in memory for the session,
+      never written to disk.
+- [ ] **Constant-time MAC comparisons.** Replace all `==` on MACs and
+      authentication tags with `subtle::ConstantTimeEq` throughout the
+      codebase.
+- [ ] **Zeroize all secret material.** Audit and fix: chain keys and
+      message keys must zeroize immediately after use, not on struct
+      drop. All `StaticSecret` fields, all `[u8; 32]` key arrays.
+- [ ] **TLS on all TCP connections.** Plaintext TCP is prohibited.
+      Add `rustls` or equivalent. All peer-to-peer and relay
+      connections must use transport encryption.
+- [ ] **Remove all `.expect()`/`.unwrap()` on security-sensitive paths.**
+      Network I/O, file I/O, and anything touching key material must
+      use Result propagation.
+- [ ] **Debug and log audit.** Verify no secret bytes appear at any log
+      level (info, debug, trace) or in any Debug impl across the entire
+      codebase.
+- [ ] **Platform-agnostic file permissions.** Encrypted files must have
+      restrictive permissions where the OS supports it.
+
+---
+
 ## Milestone 0: Foundation (DONE)
 
 What exists today.
@@ -20,14 +59,12 @@ What exists today.
 - [x] TCP relay listener with wire protocol
 - [x] Manual peer bootstrap and session establishment
 - [x] Interactive bidirectional messaging
-- [x] 106 passing tests, zero clippy warnings
 
 ---
 
 ## Milestone 1: Persistent Identity & Sessions
 
-Nodes survive restarts. Minimum requirement before network-level
-features make sense.
+Nodes survive restarts.
 
 - [x] Save identity keypair on first run, reload on subsequent starts
 - [ ] Save and reload peer table on shutdown/startup
@@ -57,8 +94,11 @@ for full authentication and offline initiation.
 ## Milestone 3: Mixnet Routing (Messages Through Sphinx)
 
 Wire Sphinx into the send path. This is where metadata resistance
-begins.
+begins. Requires fixing the multi-hop Sphinx scalar arithmetic first
+(see Nym sphinx-packet source for reference implementation).
 
+- [ ] Fix multi-hop Sphinx blinding chain (scalar field arithmetic
+      without mod-L reduction for X25519 compatibility)
 - [ ] When 3+ relays known, construct Sphinx packet instead of
       DirectMessage
 - [ ] Route selection: random 3-5 hops via `select_route`
@@ -70,6 +110,11 @@ begins.
       the connection layer via the address registry.
 - [ ] Direct TCP is fallback when fewer than 3 relays available
 - [ ] End-to-end test: 5 nodes, message through 3 relay hops
+- [ ] Known-answer tests against Signal test vectors for Double
+      Ratchet and X3DH
+- [ ] Sphinx payload encryption upgraded from XOR-based to proper
+      SPRP (Lioness wide-block cipher)
+- [ ] Fuzz testing of wire protocol parser
 
 ---
 
@@ -101,8 +146,8 @@ Real peer discovery. No more manual `--peer` configuration beyond
 initial bootstrap.
 
 - [ ] **Epoch directory**: each node publishes a signed descriptor
-      containing its overlay ID, capabilities, and optionally its
-      `bandwidth_capacity`. Descriptors valid for one epoch.
+      containing its overlay ID and capabilities. Descriptors valid
+      for one epoch.
 - [ ] **Overlay IDs only**: directories MUST NOT contain raw IP
       addresses. Routing resolution is separate from identity.
 - [ ] **Directory distribution**: descriptors propagated via gossip
@@ -213,19 +258,13 @@ Prevent attackers from flooding the network with malicious nodes.
 
 ---
 
-## Milestone 11: Hardening & Audit
+## Milestone 11: Formal Audit & Review
 
-- [ ] Remove all `.expect()` / `.unwrap()` in non-test code
-- [ ] Zeroize audit: every secret properly cleared on drop
-- [ ] Connection retry with exponential backoff
-- [ ] Known-answer tests against Signal test vectors
-- [ ] Graceful shutdown with full state persistence
-- [ ] Sphinx payload encryption upgraded from XOR-based to
-      proper SPRP (Lioness wide-block cipher)
+- [ ] Formal security review / audit by independent reviewers
 - [ ] Evaluate HPKE for key encapsulation on top of Sphinx + AEAD
-- [ ] Formal security review / audit
-- [ ] Fuzz testing of wire protocol parser
 - [ ] Memory safety audit (no unsafe, verify via cargo-deny)
+- [ ] Connection retry with exponential backoff
+- [ ] Graceful shutdown with full state persistence
 
 ---
 
@@ -241,16 +280,19 @@ Prevent attackers from flooding the network with malicious nodes.
 
 ## Design Principles
 
-1. **Security over convenience.** Every trade-off favours security.
+1. **Security is intrinsic, not a phase.** Every line of code must
+   pass the Security Gate. Features without security compliance do
+   not ship.
 2. **No custom crypto.** Audited libraries only.
 3. **Metadata resistance is not optional.** Architectural requirement.
 4. **Forward secrecy is mandatory.** Every message key is ephemeral.
 5. **No central point of failure or trust.**
 6. **Overlay identity only.** Raw IPs never appear in directories,
    announcements, or routing. Resolution is a separate layer.
-7. **Secret material is zeroized.** Keys never persist in memory
-   longer than needed.
+7. **Secret material is zeroized immediately.** Keys never persist
+   in memory longer than their single use requires.
 8. **Simplicity.** The simplest correct solution is preferred.
+9. **Platform agnostic.** No code assumes a specific operating system.
 
 ---
 
