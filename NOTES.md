@@ -89,3 +89,122 @@ All under consideration, no final design:
 - **AEAD payload**: ChaCha20-Poly1305 (preferred over AES-GCM; hardware acceleration not assumed)
 - **Sphinx construction**: PRF, MAC, per-hop padding, filler
 - **Constant-time operations**: audited Rust crypto crates (RustCrypto, Dalek)
+
+
+
+
+
+# Core Concepts
+- End to end ratchet protocol encryption
+- sphinx style onion routing
+	- Nodes can only decrypt next hop from header, not payload or deeper layers of the header's destinations. Previous hops stripped away
+- Batching & mixing
+	- Collect frames in epochs then output randomly after delay created by poisson mixing or exponential delays
+- Cover/dummy traffic
+	- Nodes inject cryptographically identical 'dummy' frames to maintain minimum traffic volume
+- Single use reply blocks (SURBs)
+	- Offline recipients can receive replies without revealing network locators. Let sender create route to recipient even if recipient is offline
+- Node selection
+	- Select peers for a route from a signed epcoh directory built via federation of directory signers or distributed consensus, or DHT with rep
+	
+# Protocol Designs
+**Frames**
+|Header|Body|MAC|
+- Header
+	- Sphinx style, encrypted onion routing per hop
+		- next_hop_id (overlay ID or public key fingerprint)
+		- per_hop_nonce (not once value unique to each hop/destination)
+		- routing mac (maybe?)
+- Body
+	- AEAD encrypted payload for end recipient
+	- Sphinx "forward" indicator if intermediary
+	- Random padding to bring to full length before encryption
+- MAC
+	- Cryptographic auth (probably poly1305) over header & body to detect tampering
+	
+## Cryptographic Primitives
+- Key Exchange
+	- X25519 for ephemeral Diffie-Helman
+- Asymmetric Encryption
+	- HPKE for enveloping
+- AEAD for Payload
+	- ChaCha20-Poly1305 (or maybe AES-GCM on accelerated hardware but preference for chachapoly)
+- Sphinx Construction for Onion Headers
+	- PRF, MAC, per hop padding, etc.
+- Constant-Time Libraries
+	- Evercrypt/HACL* bindings or preferably audited crates from Rust specific crypto libraries
+
+## Ephemeral Routing & Epochs
+- E.g. 5-30s epochs depending on privacy vs latency (aim lower for sake of usability but be wary of bandwidth usage)
+- Nodes Contain:
+	- incoming_buffer (collects frames during epoch)
+	- outgoing_buffers (per next hop lists assembled & shuffled at epoch boundary)
+- Delay
+	- Each frame to be forwarded assigned delay from posson distribution
+	- Deterministic RNG seeded by frame's per_hop_nonce to avoid RNG interaction timing leaks
+
+## SURBs (Single Use Reply Blocks)
+- Pre-computed Sphinx packet headers that contain a mixnet route back to the creator of said SURB
+- Senders can generate one or more SURBs and include them i their messages
+- Recipient uses SURB to reply or ACK (becomes sphinx header for response)
+- Like onion address but single use to prevent replay attacks
+- Mix node public keys used to prepare SURB are only valid for a different epoch
+
+## Cover/Dummy Traffic
+- Each node maintains minimum 'cover_rate' (x dummies per sec) tied to bandwidth capacity
+- Cover frames are indistinguishable from real ones (both are encrypted & MACed)
+- Nodes share "bandwidth_capacity" signed into epoch directory so peers can weight routing accordingly (could this have potential for de-anonymisation?)
+
+## Peer Connectivity Model (NAT Traversal)
+- Clients maintain persistent outbound TLS connections to a rotating set of peers (like a mesh network) and use multiplexed streams over TLS to avoid requiring inbound accept. They also work behind NAT (QUIC or TLS & HTTPS/2)
+- Each node advertises an overlay ID and list of connections to other nodes (only published inside signed directories or via current peers, not IPs)
+
+## Node Directory & Trust
+- Nodes publish presence in an epoch directory signed with the node's private key
+- Directories are published/exchanged via gossip protocol or using DHT over mix overlay
+- New nodes are rate limited in accepted frame injection until reputation accumulated or proof of work/stake is presented
+- Network could require minimum proof of work per new node session
+
+**Addendum Notes Misc.**
+- Epoch Redundancy
+	- Route each frame along multiple disjointed paths to compensate for nodes going offline (k out of n replication)
+	- Use forward error correction and/or multiple parallel frames
+- Caching
+	- Last hop nodes buffer frames for bounded window then SURBs & mailbox retrieval could allow async pickup (mailbox doesn't sit right though, find other way)
+- Rekeying & Forward Secrecy
+	- All E2E payloads use short lived ephemeral keys & ratchet protocol
+- Purely decentralised mixnet built from client nodes
+- Every node runs some mix protocol of accepting/forwarding fixed size packets, performing batching & adding delays, and injecting cover traffic
+
+## Sender -> Receiver Protocol
+**Discovery & Identity**
+Each user has ID key (public key pair) and routing address (cryptographic handle or onion like address); The address is an overlay identifier, not IP. Clients get peer list/epoch directory from bootstrap nodes or DHT
+
+**Message Creation**
+Plaintext encrypted with X3DH/double ratchet. Ciphertext is then packed into a fixed size frame, splitting or padding as necessary (4096 bytes)
+
+**Route Computation**
+Choose route of N hops where N is random value from range 3-5. Compute sphinx style header layer (each hop can only read next hop encrypted pointer)
+
+**Frame Submission**
+Sender submits frame to local mix queue and injects it to one or more peers (outbound only) according to overlay. If behind NAT, maintain persistent outbound TLS/TCP connections to selected peers so no inbound accept is required (is there a cleaner way of doing this? Seems heavy on bandwidth and battery eventually for mobile)
+
+**Node Mixing**
+Nodes collect incoming frames during current epoch window. At epoch expiration the outgoing batch of frames is shuffled and forwarded to their next hops. Dummy frames are added/removed according to quota. Delay distribution sampled per-packet for randomised output times
+
+**Delivery**
+Last hop strips final layer (without knowing it is the last one) and delivers payload (ciphertext) to recipient's mailbox/handler. Recipient can fetch from local node when online. SURBs for replies without exposing a network location
+
+**Acknowledgement**
+ACKs sent back as normal frames through mix overlay using SURBs to avoid disclosing requester of said ACK
+
+# Sybil Attack Mitigations
+All random ideas
+- Proof of work signups/registrations
+- Staking incentives (NYM mixnet as example design)
+- Reputation with per epoch limits on newer nodes (still vulnerable to larger adversaries)
+- Social trust graphs as a deterrent (might not work in a mixnet of dummy traffic)
+- ~~Personhood validation for relay type nodes? De-anonymise temporarily?~~
+- I2P implementation of kademlia (not privacy focused)
+- General rate limiting of all nodes
+
