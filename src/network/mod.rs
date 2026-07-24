@@ -1,6 +1,8 @@
 pub mod peers;
+pub mod session;
 
 pub use peers::{Network, Peer, PeerId};
+pub use session::SessionManager;
 
 use std::fmt;
 

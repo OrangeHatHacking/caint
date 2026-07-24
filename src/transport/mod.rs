@@ -1,12 +1,22 @@
 pub mod blinding;
+pub mod connection;
 pub mod epoch;
 pub mod filler;
+pub mod prekey_relay;
+pub mod relay;
 pub mod routing;
 pub mod sphinx;
+pub mod wire;
 
+pub use connection::{Connection, ConnectionPool};
 pub use epoch::EpochFlusher;
+pub use prekey_relay::PreKeyStore;
+pub use relay::{AddressRegistry, DeliveredMessage};
 pub use routing::{NodeInfo, RoutingBlock};
-pub use sphinx::{ProcessResult, ReplayCache, SphinxPacket, SPHINX_PACKET_SIZE};
+pub use sphinx::{
+    is_cover_payload, ProcessResult, ReplayCache, SphinxPacket, DUMMY_MARKER, SPHINX_PACKET_SIZE,
+};
+pub use wire::{MessageType, WireError, WireMessage};
 
 use std::fmt;
 

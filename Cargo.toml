@@ -25,8 +25,15 @@ rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 bincode = "2.0.0-rc.3"
 
-# Async runtime (transport only)
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "io-std", "sync", "signal"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
 
 [features]
 default = []

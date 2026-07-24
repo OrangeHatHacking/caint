@@ -161,6 +161,48 @@ impl Ratchet {
         }
     }
 
+    /// Initialize a symmetric ratchet from a shared secret.
+    ///
+    /// Both sides derive identical send and receive chain keys from the
+    /// shared secret using HKDF. The side with `is_alice=true` uses the
+    /// first chain for sending and the second for receiving; the other
+    /// side swaps them. This allows immediate bidirectional messaging
+    /// without waiting for a DH ratchet step.
+    pub fn init_symmetric(shared_secret: [u8; 32], is_alice: bool) -> Self {
+        let hk = Hkdf::<Sha256>::new(Some(&shared_secret), b"caint_symmetric_init");
+        let mut okm = [0u8; 96];
+        hk.expand(b"ratchet_init", &mut okm).expect("HKDF expand");
+
+        let mut root_key = [0u8; 32];
+        let mut chain_a = [0u8; 32];
+        let mut chain_b = [0u8; 32];
+        root_key.copy_from_slice(&okm[..32]);
+        chain_a.copy_from_slice(&okm[32..64]);
+        chain_b.copy_from_slice(&okm[64..96]);
+
+        let dh_self_priv = StaticSecret::random_from_rng(OsRng);
+        let dh_self_pub = PublicKey::from(&dh_self_priv);
+
+        let (chain_send, chain_recv) = if is_alice {
+            (chain_a, chain_b)
+        } else {
+            (chain_b, chain_a)
+        };
+
+        Ratchet {
+            root_key,
+            dh_self_priv,
+            dh_self_pub,
+            dh_remote: None,
+            chain_send: Some(chain_send),
+            chain_recv: Some(chain_recv),
+            send_n: 0,
+            recv_n: 0,
+            prev_chain_len: 0,
+            skipped_keys: HashMap::new(),
+        }
+    }
+
     // ── Encryption ─────────────────────────────────────────────────
 
     /// Encrypt a plaintext message. Returns (header, ciphertext).
@@ -243,7 +285,9 @@ impl Ratchet {
         // 2. DH ratchet step if header has a new DH key
         let need_dh_ratchet = match &self.dh_remote {
             Some(current) => current.to_bytes() != header.dh_public_key,
-            None => true,
+            // If dh_remote is None but we already have a recv chain (symmetric init),
+            // don't trigger DH ratchet — just use the existing chain.
+            None => self.chain_recv.is_none(),
         };
 
         if need_dh_ratchet {
@@ -563,6 +607,25 @@ mod tests {
         assert_eq!(header.dh_public_key, restored.dh_public_key);
         assert_eq!(header.prev_chain_length, restored.prev_chain_length);
         assert_eq!(header.msg_num, restored.msg_num);
+    }
+
+    #[test]
+    fn test_symmetric_init_bidirectional() {
+        let sk = [42u8; 32];
+        let ad = b"test";
+
+        let mut alice = Ratchet::init_symmetric(sk, true);
+        let mut bob = Ratchet::init_symmetric(sk, false);
+
+        // Alice -> Bob
+        let (h1, ct1) = alice.encrypt(b"hello bob", ad);
+        let pt1 = bob.decrypt(&h1, &ct1, ad).unwrap();
+        assert_eq!(pt1, b"hello bob");
+
+        // Bob -> Alice
+        let (h2, ct2) = bob.encrypt(b"hello alice", ad);
+        let pt2 = alice.decrypt(&h2, &ct2, ad).unwrap();
+        assert_eq!(pt2, b"hello alice");
     }
 
     #[test]

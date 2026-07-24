@@ -27,6 +27,23 @@ pub const HEADER_SIZE: usize = 32 + 16 + ROUTING_INFO_SIZE;
 /// Payload size (matches frame size).
 pub const PAYLOAD_SIZE: usize = 4096;
 
+/// Magic marker prefix for cover (dummy) payloads.
+///
+/// Placed at the start of the decrypted payload. Only detectable after the
+/// final Sphinx decryption layer is removed. Intermediate relays cannot
+/// see this marker because it is encrypted under multiple layers.
+pub const DUMMY_MARKER: [u8; 16] = [
+    0xCA, 0x1A, 0x7D, 0x00, 0x00, 0x7D, 0xA1, 0xAC, 0xCA, 0x1A, 0x7D, 0x00, 0x00, 0x7D, 0xA1, 0xAC,
+];
+
+/// Check if a decrypted payload is a cover (dummy) packet.
+///
+/// Returns true if the payload starts with the DUMMY_MARKER.
+/// This MUST only be called on the fully decrypted final-destination payload.
+pub fn is_cover_payload(payload: &[u8]) -> bool {
+    payload.len() >= DUMMY_MARKER.len() && payload[..DUMMY_MARKER.len()] == DUMMY_MARKER
+}
+
 /// Per-hop derived keys.
 struct HopKeys {
     stream_key: [u8; 32],
@@ -285,11 +302,36 @@ impl SphinxPacket {
         }
     }
 
-    /// Generate a dummy Sphinx packet (random 4429 bytes).
+    /// Generate a dummy Sphinx packet (random bytes, NOT valid Sphinx).
+    ///
+    /// This is only useful for tests and size checks. For production cover
+    /// traffic, use `create_cover_packet()` which produces a fully valid
+    /// Sphinx loop packet.
     pub fn dummy() -> Self {
         let mut data = [0u8; SPHINX_PACKET_SIZE];
         OsRng.fill_bytes(&mut data);
         SphinxPacket { data }
+    }
+
+    /// Create a cover (loop) packet that is a fully valid Sphinx packet.
+    ///
+    /// The packet routes through `route` (which must end with the sender's
+    /// own NodeInfo as the final destination) and carries a payload prefixed
+    /// with DUMMY_MARKER followed by random padding. Intermediate relays
+    /// process it identically to a real packet. Only the final destination
+    /// can detect the dummy marker after decryption.
+    ///
+    /// `route` must contain 3-5 relay hops followed by the sender (loop
+    /// destination), totaling 4-6 entries.
+    pub fn create_cover_packet(route: &[NodeInfo]) -> Result<Self, SphinxError> {
+        // Build a payload with DUMMY_MARKER prefix + random padding
+        let mut payload = [0u8; PAYLOAD_SIZE];
+        payload[..DUMMY_MARKER.len()].copy_from_slice(&DUMMY_MARKER);
+        OsRng.fill_bytes(&mut payload[DUMMY_MARKER.len()..]);
+
+        // Use the standard Sphinx create — the packet is structurally
+        // identical to a real message packet.
+        Self::create(&payload, route)
     }
 
     /// Get the packet size.
@@ -468,6 +510,64 @@ mod tests {
         assert_ne!(ri, original);
         encrypt_routing_info(&mut ri, &key); // XOR again
         assert_eq!(ri, original);
+    }
+
+    #[test]
+    fn test_is_cover_payload_with_marker() {
+        let mut payload = vec![0u8; PAYLOAD_SIZE];
+        payload[..DUMMY_MARKER.len()].copy_from_slice(&DUMMY_MARKER);
+        assert!(is_cover_payload(&payload));
+    }
+
+    #[test]
+    fn test_is_cover_payload_without_marker() {
+        let payload = vec![0u8; PAYLOAD_SIZE];
+        assert!(!is_cover_payload(&payload));
+    }
+
+    #[test]
+    fn test_is_cover_payload_random_data() {
+        let mut payload = vec![0u8; PAYLOAD_SIZE];
+        OsRng.fill_bytes(&mut payload);
+        // Extremely unlikely to start with DUMMY_MARKER by chance
+        assert!(!is_cover_payload(&payload));
+    }
+
+    #[test]
+    fn test_is_cover_payload_too_short() {
+        let payload = vec![0u8; 8]; // shorter than DUMMY_MARKER
+        assert!(!is_cover_payload(&payload));
+    }
+
+    #[test]
+    fn test_cover_packet_size() {
+        // Create a valid route for cover packet
+        let nodes: Vec<NodeInfo> = (1..=4)
+            .map(|i| {
+                let secret = StaticSecret::from([i; 32]);
+                NodeInfo {
+                    id: [i; 32],
+                    public_key: PublicKey::from(&secret),
+                    address: format!("relay_{}:9000", i),
+                }
+            })
+            .collect();
+
+        // Destination is the "sender" (loop)
+        let sender = {
+            let secret = StaticSecret::from([99u8; 32]);
+            NodeInfo {
+                id: [99u8; 32],
+                public_key: PublicKey::from(&secret),
+                address: "sender:9000".to_string(),
+            }
+        };
+
+        let mut route = nodes;
+        route.push(sender);
+
+        let pkt = SphinxPacket::create_cover_packet(&route).unwrap();
+        assert_eq!(pkt.data.len(), SPHINX_PACKET_SIZE);
     }
 
     #[test]
