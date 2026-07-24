@@ -6,6 +6,20 @@ Fully decentralized end-to-end encrypted messenger with Sphinx mixnet routing fo
 
 The goal is Signal-level encryption with stronger metadata protection: no central server, no phone number, no way for any single party (including relay operators) to determine who is talking to whom.
 
+## Why This Exists
+
+Privacy is an inherent right that is being stolen by surveillance capitalism.
+
+Caint exists because the infrastructure of communication should not be owned, surveilled, or controlled by states or corporations. This project is built on the principles of mutual aid, decentralisation, and the belief that people have an unconditional right to speak privately.
+
+This is a political project. It is anarchist in the truest sense. A commitment to a world built on liberty, equality, and voluntary cooperation rather than coercion. A world without borders used as weapons, without empires extracting wealth from the periphery, without hierarchies that exist to dominate rather than to serve. This project believes in solidarity across every division that power has constructed such as race, gender, sexuality, nationality, and in the dignity of every person to live free from surveillance and control.
+
+It stands against every form of domination: the state, capital, patriarchy, racism, transphobia, homophobia, imperialism, and the apparatus of surveillance that sustains them all. The technology serves the politics and the politics serves the people.
+
+If you use this, contribute back. If you build on it, share it. To take you must also give. That is the deal and the protocols of this messenger have been designed as such to implement these principles as best as possible.
+
+Níl aon saoirse gan saoirse gach duine
+
 ## Current State
 
 Caint is a working E2EE messenger. Nodes discover each other, establish encrypted sessions automatically, and exchange messages interactively over TCP. All messages are encrypted with ChaCha20-Poly1305 using per-message keys derived from the Double Ratchet protocol. Forward secrecy is active from the first message.

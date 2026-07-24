@@ -156,6 +156,21 @@ be justified.
 - Code MUST be written for readability. Clever optimizations
   MUST include explanatory comments justifying the trade-off.
 
+### VIII. Political Commitment
+
+This project exists to serve the right to private communication
+free from state and corporate surveillance. This commitment is
+non-negotiable and supersedes commercial, institutional, or
+governmental interests.
+
+- Design decisions MUST NOT accommodate lawful interception,
+  backdoors, key escrow, or any mechanism that would allow a
+  third party to access communications.
+- The project MUST NOT accept funding, partnership, or
+  contribution that requires compromising the privacy of users.
+- Contributions that weaken privacy to serve convenience,
+  compliance, or commercial viability MUST be rejected.
+
 ## Security Requirements
 
 ### Cryptographic Standards
