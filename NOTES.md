@@ -34,14 +34,14 @@ that haven't been formalised yet.
 
 - Each node maintains a minimum `cover_rate` (dummies per second) tied to bandwidth capacity.
 - Cover frames are cryptographically identical to real frames (encrypted, MACed, routed through the mixnet).
-- **Open question**: nodes could publish `bandwidth_capacity` in the epoch directory so peers can weight routing. But could this enable de-anonymisation by fingerprinting nodes by capacity?
+- **Decision**: do NOT publish exact bandwidth capacity in the epoch directory. Exact capacity values fingerprint nodes and enable de-anonymisation. Use reputation-based routing weight instead (nodes that reliably forward packets get more traffic routed through them). If capacity tiers are ever needed, use coarse categories ("low"/"medium"/"high") only.
 
 ### NAT Traversal & Connectivity
 
 - Clients maintain persistent **outbound** TLS connections to a rotating set of peers (mesh-like). Multiplexed streams over TLS or QUIC avoid requiring inbound port acceptance.
 - Works behind NAT: no listener required. Outbound-only connections to overlay peers.
 - Each node advertises an **overlay ID** and connection list -- never raw IPs. Published only inside signed directories or via current peers.
-- **Open question**: persistent outbound connections may be heavy on bandwidth/battery for mobile. Investigate lighter alternatives (e.g., QUIC with connection migration).
+- **Decision**: QUIC is the preferred transport, especially for mobile. QUIC handles WiFi-to-cellular transitions natively via connection migration. Mobile nodes connect to fewer peers (2-3 vs 5-10 for desktop) and use a lower cover traffic rate when on battery. A lightweight push notification via a trusted relay ("you have mail", no content) wakes backgrounded mobile apps. The privacy/battery trade-off MUST be transparent to the user.
 
 ## Sender -> Receiver Flow
 
@@ -57,7 +57,7 @@ that haven't been formalised yet.
 
 - Route each frame along **multiple disjoint paths** to compensate for nodes going offline (k-of-n replication).
 - Forward error correction and/or parallel frames as alternatives.
-- Last-hop nodes buffer frames for a bounded time window for async pickup. SURBs enable mailbox-style retrieval without a centralised store. (Open question: "mailbox" at last hop still feels like a partial centralisation point -- explore alternatives.)
+- Last-hop nodes buffer frames for a bounded time window for async pickup. **Decision**: last-hop buffering IS a centralisation risk if a recipient always uses the same relay. Mitigations: (1) sender picks a random last-hop each time; (2) recipient pre-distributes SURBs to multiple relays so messages are forwarded through the mixnet (relay never learns who recipient is); (3) short TTL (e.g., 24 hours) on buffered messages. The relay holds an opaque blob + SURB, nothing more.
 
 ## Rekeying & Forward Secrecy
 
@@ -78,7 +78,7 @@ All under consideration, no final design:
 - **Staking incentives** (Nym mixnet model)
 - **Per-epoch rate limits** on newer nodes until reputation accumulated (still vulnerable to well-resourced adversaries)
 - **General rate limiting** of all nodes
-- **Social trust graphs** as deterrent (may not work well in a mixnet with cover traffic)
+- ~~Social trust graphs as deterrent~~ **(rejected)**: fundamentally at odds with a privacy-focused mixnet. If you can build a trust graph you've already leaked relationship metadata. Works at bootstrap level only, not as a general Sybil defence.
 - ~~Personhood validation for relay nodes (rejected: requires de-anonymisation)~~
 - I2P's Kademlia DHT (reference only, not privacy-focused enough for this use case)
 

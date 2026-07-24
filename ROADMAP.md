@@ -114,10 +114,10 @@ initial bootstrap.
       connections.
 - [ ] **Descriptor signing**: signed with Ed25519 identity key.
       Peers verify signatures before trusting.
-- [ ] **Bandwidth capacity advertising**: nodes publish capacity
-      so routing can weight accordingly. (Open question: does this
-      enable de-anonymisation by fingerprinting nodes? Needs
-      analysis before enabling.)
+- [ ] **Reputation-based routing weight**: route selection prefers
+      nodes with higher delivery success and uptime. Do NOT publish
+      exact bandwidth capacity (fingerprinting risk). If capacity
+      tiers are ever needed, use coarse categories only.
 
 ---
 
@@ -126,14 +126,22 @@ initial bootstrap.
 Nodes behind NAT must be able to participate without inbound port
 forwarding.
 
-- [ ] Persistent **outbound-only** TLS/QUIC connections to a
-      rotating set of overlay peers (mesh-like topology)
+- [ ] **QUIC transport** as the primary protocol (preferred over
+      raw TLS/TCP). QUIC handles WiFi-to-cellular transitions
+      natively via connection migration.
+- [ ] Persistent **outbound-only** connections to a rotating set
+      of overlay peers (mesh-like topology)
 - [ ] Multiplexed streams over a single connection to avoid
       per-message connection overhead
 - [ ] No inbound listener required for clients (relay nodes
       still need to accept connections)
-- [ ] QUIC with connection migration for mobile (investigate
-      bandwidth/battery impact)
+- [ ] **Mobile-specific parameters**: reduced peer connections
+      (2-3 vs 5-10 for desktop), lower cover traffic rate when
+      on battery, with the privacy/battery trade-off transparent
+      to the user
+- [ ] **Push notification via trusted relay**: lightweight "you
+      have mail" signal (no content) to wake backgrounded mobile
+      apps for message retrieval
 - [ ] Nodes advertise connection list via overlay (which peers
       they can reach), not IP addresses
 
@@ -160,17 +168,22 @@ Anonymous replies without revealing the sender's network location.
 
 ## Milestone 8: Epoch Redundancy & Reliability
 
-Compensate for nodes going offline mid-route.
+Compensate for nodes going offline mid-route and enable async
+message delivery.
 
 - [ ] Route each frame along **multiple disjoint paths** (k-of-n
       replication) so delivery succeeds if some relays drop
 - [ ] Forward error correction as alternative or supplement to
       full path replication
-- [ ] Last-hop nodes buffer frames for a bounded time window for
-      **async pickup** when recipient is offline
-- [ ] Evaluate whether last-hop buffering creates a centralisation
-      point; explore alternatives (e.g., multiple last-hops,
-      SURB-based mailbox retrieval)
+- [ ] Last-hop nodes buffer frames for a bounded time window with
+      **short TTL** (e.g., 24 hours)
+- [ ] **Random last-hop selection**: sender picks a different last
+      relay each time to prevent fixed-mailbox centralisation
+- [ ] **SURB-based retrieval**: recipient pre-distributes SURBs to
+      multiple relays. When a message arrives, the relay uses the
+      SURB to forward it through the mixnet to the recipient. The
+      relay never learns who the recipient is -- it holds only an
+      opaque blob and a SURB header.
 
 ---
 
@@ -187,9 +200,6 @@ Prevent attackers from flooding the network with malicious nodes.
       routes prefer higher-reputation relays
 - [ ] **Eclipse attack resistance**: route selection avoids too
       many relays from the same network/ASN
-- [ ] **Social trust graph** as supplementary Sybil deterrent
-      (effectiveness in a mixnet with cover traffic is unclear --
-      needs evaluation)
 
 ---
 
