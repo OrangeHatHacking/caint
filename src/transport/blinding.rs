@@ -1,30 +1,40 @@
 //! Group element re-randomization for Sphinx packets.
-//!
-//! Each hop re-randomizes the group element (alpha) using a blinding factor
-//! derived from the per-hop shared secret, so successive hops cannot link packets.
 
-use x25519_dalek::{PublicKey, StaticSecret};
+use curve25519_dalek::montgomery::MontgomeryPoint;
+use curve25519_dalek::scalar::Scalar;
+use x25519_dalek::PublicKey;
+
+/// Clamp bytes and convert to a curve25519-dalek Scalar (mod L reduction).
+fn clamp_and_reduce(bytes: &[u8; 32]) -> Scalar {
+    let mut clamped = *bytes;
+    clamped[0] &= 248;
+    clamped[31] &= 127;
+    clamped[31] |= 64;
+    Scalar::from_bytes_mod_order(clamped)
+}
 
 /// Blind the alpha (group element) for the next hop.
 ///
-/// alpha_next = blinding_factor * alpha (scalar multiplication on Curve25519)
+/// alpha_next = clamp_reduce(blinding_factor) * alpha
+///
+/// Uses Scalar * MontgomeryPoint (unclamped scalar after initial clamp+reduce)
+/// for consistency with the sender's chain in sphinx.rs.
 pub fn blind_alpha(alpha: &PublicKey, blinding_factor: &[u8; 32]) -> PublicKey {
-    let blind_secret = StaticSecret::from(*blinding_factor);
-    let blinded = blind_secret.diffie_hellman(alpha);
-    PublicKey::from(*blinded.as_bytes())
+    let bf_scalar = clamp_and_reduce(blinding_factor);
+    let alpha_point = MontgomeryPoint(alpha.to_bytes());
+    let blinded = bf_scalar * alpha_point;
+    PublicKey::from(blinded.to_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rand::{rngs::OsRng, RngCore};
+    use x25519_dalek::StaticSecret;
 
     #[test]
     fn test_blinding_produces_different_key() {
-        let mut alpha_bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut alpha_bytes);
-        // Clamp to valid X25519 point
-        let secret = StaticSecret::from(alpha_bytes);
+        let secret = StaticSecret::random_from_rng(OsRng);
         let alpha = PublicKey::from(&secret);
 
         let mut bf = [0u8; 32];

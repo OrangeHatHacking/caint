@@ -284,4 +284,47 @@ mod tests {
         let batch = flusher.flush();
         assert_eq!(batch.len(), 2); // no padding
     }
+
+    #[test]
+    fn test_cover_batch_indistinguishable() {
+        // SC-004: mixed batch of real + cover, all same size, all unique alphas
+        let mut flusher = EpochFlusher::new(10);
+        let self_node = make_node(99);
+        let relays: Vec<NodeInfo> = (1..=10).map(|i| make_node(i)).collect();
+
+        // Enqueue 3 "real" packets (using dummy() for size, but with addresses)
+        flusher.enqueue(SphinxPacket::dummy(), "relay_1:9000".into());
+        flusher.enqueue(SphinxPacket::dummy(), "relay_2:9000".into());
+        flusher.enqueue(SphinxPacket::dummy(), "relay_3:9000".into());
+
+        let batch = flusher.flush_with_cover(&self_node, &relays);
+
+        // Must have exactly 10 packets
+        assert_eq!(batch.len(), 10);
+
+        // All must be 4429 bytes
+        for qp in &batch {
+            assert_eq!(qp.packet.data.len(), SPHINX_PACKET_SIZE);
+        }
+
+        // All must have non-empty first-hop addresses
+        for qp in &batch {
+            assert!(!qp.first_hop_addr.is_empty());
+        }
+
+        // All alpha values (first 32 bytes) must be unique
+        let alphas: std::collections::HashSet<[u8; 32]> = batch
+            .iter()
+            .map(|qp| {
+                let mut alpha = [0u8; 32];
+                alpha.copy_from_slice(&qp.packet.data[..32]);
+                alpha
+            })
+            .collect();
+        assert_eq!(
+            alphas.len(),
+            10,
+            "All packets must have unique ephemeral keys"
+        );
+    }
 }
