@@ -166,13 +166,6 @@ dependency and priority. The short version:
 8. **Group messaging & UX**
 9. **Hardening & audit**
 
-## Adding Design Requirements
-
-Security principles and non-negotiable rules live in
-`.specify/memory/constitution.md`. To add new requirements (mixing
-strategy, Sybil policy, admission control), update the constitution.
-All future implementations must comply with it.
-
 ## Tests
 
 ```bash

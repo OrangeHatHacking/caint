@@ -182,10 +182,6 @@ to deanonymize users.
 
 ## Design Principles
 
-These are captured in detail in `.specify/memory/constitution.md`
-and should be updated via `/speckit.constitution` as new security
-requirements are formalised.
-
 Key principles:
 
 1. **Security over convenience.** Every trade-off favours security.
