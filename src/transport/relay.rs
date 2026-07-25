@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 use x25519_dalek::StaticSecret;
 
-use crate::transport::connection::ConnectionPool;
+use crate::transport::connection::{noise_handshake_responder, noise_recv, ConnectionPool};
 use crate::transport::prekey_relay::PreKeyStore;
 use crate::transport::sphinx::{
     is_cover_payload, ProcessResult, ReplayCache, SphinxPacket, SPHINX_PACKET_SIZE,
@@ -58,6 +58,7 @@ impl Default for AddressRegistry {
 pub async fn run_relay(
     listen_addr: &str,
     node_key: Arc<StaticSecret>,
+    noise_private_key: Arc<[u8; 32]>,
     replay_cache: Arc<Mutex<ReplayCache>>,
     connection_pool: Arc<ConnectionPool>,
     delivery_tx: mpsc::Sender<DeliveredMessage>,
@@ -72,6 +73,7 @@ pub async fn run_relay(
         debug!(peer = %peer_addr, "Accepted connection");
 
         let node_key = Arc::clone(&node_key);
+        let noise_key = Arc::clone(&noise_private_key);
         let replay_cache = Arc::clone(&replay_cache);
         let connection_pool = Arc::clone(&connection_pool);
         let delivery_tx = delivery_tx.clone();
@@ -82,6 +84,7 @@ pub async fn run_relay(
             if let Err(e) = handle_connection(
                 stream,
                 node_key,
+                noise_key,
                 replay_cache,
                 connection_pool,
                 delivery_tx,
@@ -103,18 +106,23 @@ pub async fn run_relay(
     }
 }
 
-/// Handle a single incoming connection.
+/// Handle a single incoming connection with Noise handshake.
 async fn handle_connection(
     mut stream: tokio::net::TcpStream,
     node_key: Arc<StaticSecret>,
+    noise_key: Arc<[u8; 32]>,
     replay_cache: Arc<Mutex<ReplayCache>>,
     connection_pool: Arc<ConnectionPool>,
     delivery_tx: mpsc::Sender<DeliveredMessage>,
     prekey_store: Arc<Mutex<PreKeyStore>>,
     address_registry: Arc<Mutex<AddressRegistry>>,
 ) -> Result<(), WireError> {
+    // Noise XX handshake as responder
+    let mut transport = noise_handshake_responder(&mut stream, &noise_key).await?;
+    debug!("Noise handshake complete");
+
     loop {
-        let msg = WireMessage::read_from(&mut stream).await?;
+        let msg = noise_recv(&mut stream, &mut transport).await?;
 
         match msg.msg_type {
             MessageType::SphinxData => {

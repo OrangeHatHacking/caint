@@ -8,7 +8,7 @@ pub mod routing;
 pub mod sphinx;
 pub mod wire;
 
-pub use connection::{Connection, ConnectionPool};
+pub use connection::ConnectionPool;
 pub use epoch::EpochFlusher;
 pub use prekey_relay::PreKeyStore;
 pub use relay::{AddressRegistry, DeliveredMessage};

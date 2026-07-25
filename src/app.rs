@@ -35,6 +35,7 @@ pub struct App {
     pub prekey_store: Arc<Mutex<PreKeyStore>>,
     pub address_registry: Arc<Mutex<AddressRegistry>>,
     pub available_relays: Arc<Mutex<Vec<NodeInfo>>>,
+    noise_private_key: [u8; 32],
 }
 
 impl App {
@@ -94,7 +95,9 @@ impl App {
         let _opks = generate_one_time_prekeys(1, 100);
 
         let network = Arc::new(Mutex::new(Network::new()));
-        let connection_pool = Arc::new(ConnectionPool::new());
+        // Noise transport key derived from X25519 identity key
+        let noise_key = identity.x25519_private_key().to_bytes();
+        let connection_pool = Arc::new(ConnectionPool::new(noise_key));
         let epoch_flusher = Arc::new(Mutex::new(EpochFlusher::new(config.target_packet_count)));
         let replay_cache = Arc::new(Mutex::new(ReplayCache::new(Duration::from_secs(
             config.replay_ttl_secs,
@@ -115,6 +118,7 @@ impl App {
             prekey_store,
             address_registry,
             available_relays,
+            noise_private_key: noise_key,
         }
     }
 
@@ -151,6 +155,7 @@ impl App {
 
         // Start relay listener
         let relay_key = Arc::new(StaticSecret::random_from_rng(rand::rngs::OsRng));
+        let noise_key_relay = Arc::new(self.noise_private_key);
         let listen_addr = self.config.listen_addr.clone();
         let replay_cache = Arc::clone(&self.replay_cache);
         let conn_pool = Arc::clone(&self.connection_pool);
@@ -162,6 +167,7 @@ impl App {
             if let Err(e) = run_relay(
                 &listen_addr,
                 relay_key,
+                noise_key_relay,
                 replay_cache,
                 conn_pool,
                 delivery_tx_relay,

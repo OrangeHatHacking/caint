@@ -25,9 +25,9 @@ before the Security Gate was established. They must be fixed first.
 - [x] **Zeroize all secret material.** Ratchet Drop impl zeroizes
       root_key, chain keys, skipped keys. Message keys zeroized
       immediately after AEAD use. Storage key zeroized on drop.
-- [ ] **Noise protocol on all TCP connections.** Plaintext TCP is
-      prohibited. Add `snow` crate for Noise XX handshake with
-      X25519 identity keys.
+- [x] **Noise protocol on all TCP connections.** All connections
+      use Noise XX handshake (snow crate, pure-Rust) with X25519
+      identity keys. No plaintext TCP.
 - [x] **Audit `.expect()`/`.unwrap()`.** Confirmed: remaining
       `.expect()` calls are on infallible operations (HKDF with
       constant params, AEAD encrypt with valid key). Documented.
