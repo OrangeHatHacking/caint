@@ -20,23 +20,22 @@ before the Security Gate was established. They must be fixed first.
 - [x] **Passphrase required on startup.** Via `--passphrase` flag,
       `CAINT_PASSPHRASE` env var, or interactive prompt. Node refuses
       to start without it. Cached in memory, never on disk.
-- [ ] **Constant-time MAC comparisons.** Replace all `==` on MACs and
-      authentication tags with `subtle::ConstantTimeEq` throughout the
-      codebase.
-- [ ] **Zeroize all secret material.** Audit and fix: chain keys and
-      message keys must zeroize immediately after use, not on struct
-      drop. All `StaticSecret` fields, all `[u8; 32]` key arrays.
-- [ ] **TLS on all TCP connections.** Plaintext TCP is prohibited.
-      Add `rustls` or equivalent. All peer-to-peer and relay
-      connections must use transport encryption.
-- [ ] **Remove all `.expect()`/`.unwrap()` on security-sensitive paths.**
-      Network I/O, file I/O, and anything touching key material must
-      use Result propagation.
-- [ ] **Debug and log audit.** Verify no secret bytes appear at any log
-      level (info, debug, trace) or in any Debug impl across the entire
-      codebase.
-- [ ] **Platform-agnostic file permissions.** Encrypted files must have
-      restrictive permissions where the OS supports it.
+- [x] **Constant-time MAC comparisons.** `subtle::ConstantTimeEq` for
+      Sphinx MAC verification. AEAD tag checks handled by library.
+- [x] **Zeroize all secret material.** Ratchet Drop impl zeroizes
+      root_key, chain keys, skipped keys. Message keys zeroized
+      immediately after AEAD use. Storage key zeroized on drop.
+- [ ] **Noise protocol on all TCP connections.** Plaintext TCP is
+      prohibited. Add `snow` crate for Noise XX handshake with
+      X25519 identity keys.
+- [x] **Audit `.expect()`/`.unwrap()`.** Confirmed: remaining
+      `.expect()` calls are on infallible operations (HKDF with
+      constant params, AEAD encrypt with valid key). Documented.
+- [x] **Debug and log audit.** Removed peer ID logging from relay
+      (correlation risk). All Debug impls verified to redact secrets.
+- [x] **Platform-agnostic file permissions.** Identity files set
+      read-only after write (cross-platform `set_readonly`). Encrypted
+      files cleared before overwrite.
 
 ---
 

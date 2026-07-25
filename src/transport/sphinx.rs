@@ -12,6 +12,7 @@ use rand::{rngs::OsRng, RngCore};
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::transport::blinding::blind_alpha;
@@ -464,7 +465,8 @@ impl SphinxPacket {
         let routing_info = &self.data[48..48 + ROUTING_INFO_SIZE];
 
         let computed_mac = compute_mac(&keys.mac_key, routing_info);
-        if computed_mac != stored_mac[..16] {
+        // Constant-time comparison to prevent timing side-channel (Constitution VI)
+        if computed_mac.ct_eq(&stored_mac[..16]).unwrap_u8() != 1 {
             return Err(SphinxError::ProcessingFailed);
         }
 

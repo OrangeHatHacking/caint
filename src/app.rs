@@ -86,7 +86,7 @@ impl App {
             s
         };
         let master_key = crate::storage::MasterKey::derive_default(pp, &session_salt)
-            .expect("Argon2 key derivation failed");
+            .expect("Argon2id with constant params is infallible");
 
         let storage = Arc::new(Storage::new(&master_key, data_path));
         let identity = Arc::new(identity);

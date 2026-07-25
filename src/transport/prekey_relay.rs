@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use tracing::debug;
+use tracing::trace;
 
 /// Relay-side storage for pre-key bundles.
 ///
@@ -25,7 +25,8 @@ impl PreKeyStore {
         }
         let peer_id = crate::utils::hex_encode(&payload[..32]);
         let bundle_data = payload[32..].to_vec();
-        debug!(peer_id = %peer_id, bundle_size = bundle_data.len(), "Storing pre-key bundle");
+        // Do not log peer_id -- creates correlation records (Constitution V)
+        trace!(bundle_size = bundle_data.len(), "Stored pre-key bundle");
         self.bundles.insert(peer_id, bundle_data);
     }
 

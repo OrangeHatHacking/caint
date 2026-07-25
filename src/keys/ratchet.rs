@@ -8,6 +8,7 @@ use rand::rngs::OsRng;
 use sha2::Sha256;
 use std::collections::HashMap;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroize;
 
 use crate::keys::DecryptError;
 
@@ -232,7 +233,7 @@ impl Ratchet {
         }
 
         let ck = self.chain_send.as_ref().unwrap();
-        let (next_ck, message_key) = Self::kdf_chain_key(ck);
+        let (next_ck, mut message_key) = Self::kdf_chain_key(ck);
         self.chain_send = Some(next_ck);
 
         let header = RatchetHeader {
@@ -242,22 +243,22 @@ impl Ratchet {
         };
         self.send_n += 1;
 
-        // Encrypt with ChaCha20-Poly1305
-        // AD for AEAD = external AD || serialized header
         let mut full_ad = Vec::with_capacity(ad.len() + 40);
         full_ad.extend_from_slice(ad);
         full_ad.extend_from_slice(&header.to_bytes());
 
         let key = Key::from_slice(&message_key);
         let cipher = ChaCha20Poly1305::new(key);
-        // Use message counter as nonce (padded to 12 bytes)
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes[8..12].copy_from_slice(&(self.send_n - 1).to_be_bytes());
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = cipher
             .encrypt(nonce, plaintext)
-            .expect("AEAD encryption should not fail");
+            .expect("ChaCha20-Poly1305 encrypt is infallible with valid key/nonce");
+
+        // Zeroize message key immediately after use (Constitution VI)
+        message_key.zeroize();
 
         (header, ciphertext)
     }
@@ -275,11 +276,13 @@ impl Ratchet {
         ad: &[u8],
     ) -> Result<Vec<u8>, DecryptError> {
         // 1. Check skipped keys
-        if let Some(mk) = self
+        if let Some(mut mk) = self
             .skipped_keys
             .remove(&(header.dh_public_key, header.msg_num))
         {
-            return self.decrypt_with_key(&mk, header, ciphertext, ad);
+            let result = self.decrypt_with_key(&mk, header, ciphertext, ad);
+            mk.zeroize(); // Zeroize immediately after use (Constitution VI)
+            return result;
         }
 
         // 2. DH ratchet step if header has a new DH key
@@ -307,11 +310,13 @@ impl Ratchet {
             .chain_recv
             .as_ref()
             .ok_or(DecryptError::InvalidHeader)?;
-        let (next_ck, message_key) = Self::kdf_chain_key(ck);
+        let (next_ck, mut message_key) = Self::kdf_chain_key(ck);
         self.chain_recv = Some(next_ck);
         self.recv_n += 1;
 
-        self.decrypt_with_key(&message_key, header, ciphertext, ad)
+        let result = self.decrypt_with_key(&message_key, header, ciphertext, ad);
+        message_key.zeroize(); // Zeroize immediately after use (Constitution VI)
+        result
     }
 
     /// Perform the DH ratchet step on receiving a new remote DH key.
@@ -398,6 +403,23 @@ impl Ratchet {
     /// Get the number of skipped keys currently cached.
     pub fn skipped_key_count(&self) -> usize {
         self.skipped_keys.len()
+    }
+}
+
+impl Drop for Ratchet {
+    fn drop(&mut self) {
+        self.root_key.zeroize();
+        if let Some(ref mut ck) = self.chain_send {
+            ck.zeroize();
+        }
+        if let Some(ref mut ck) = self.chain_recv {
+            ck.zeroize();
+        }
+        // Zeroize all cached skipped message keys
+        for mk in self.skipped_keys.values_mut() {
+            mk.zeroize();
+        }
+        self.skipped_keys.clear();
     }
 }
 

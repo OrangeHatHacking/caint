@@ -147,11 +147,8 @@ async fn handle_connection(
                     decode_peer_announce(&msg.payload)
                 {
                     let node_id_hex = crate::utils::hex_encode(&x);
-                    info!(
-                        peer = %&node_id_hex[..16],
-                        addr = %addr,
-                        "Peer announced"
-                    );
+                    // Log announcement without peer identity (Constitution V)
+                    debug!("Peer announced");
                     // Register in address registry
                     let mut reg = address_registry.lock().await;
                     reg.register(&node_id_hex, &addr);

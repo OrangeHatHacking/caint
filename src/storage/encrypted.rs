@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::storage::StorageError;
+use zeroize::Zeroize;
 
 /// Encrypted file-based storage for ratchet states, identity keys, and message history.
 pub struct Storage {
@@ -92,6 +93,14 @@ impl Storage {
     pub fn save_encrypted(&self, filename: &str, data: &[u8]) -> Result<(), StorageError> {
         let encrypted = self.encrypt_blob(data);
         let path = self.base_path.join(filename);
+        // Clear readonly if file exists (may have been set previously).
+        // File contents are passphrase-encrypted regardless of permissions.
+        #[allow(clippy::permissions_set_readonly_false)]
+        if path.exists() {
+            let mut perms = fs::metadata(&path)?.permissions();
+            perms.set_readonly(false);
+            fs::set_permissions(&path, perms)?;
+        }
         fs::write(&path, &encrypted)?;
         Ok(())
     }
@@ -157,9 +166,10 @@ impl Storage {
         out.extend_from_slice(&ciphertext);
 
         fs::write(&path, &out)?;
-        // Restrictive permissions handled by the OS-level encryption
-        // and the passphrase requirement. No platform-specific permission
-        // calls -- the file is opaque ciphertext without the passphrase.
+        // Defense-in-depth: set read-only (cross-platform)
+        let mut perms = fs::metadata(&path)?.permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&path, perms)?;
         Ok(())
     }
 
@@ -319,8 +329,7 @@ impl Storage {
 
 impl Drop for Storage {
     fn drop(&mut self) {
-        // Zeroize storage key
-        self.storage_key.iter_mut().for_each(|b| *b = 0);
+        self.storage_key.zeroize();
     }
 }
 
