@@ -10,7 +10,7 @@ use crate::config::AppConfig;
 use crate::keys::identity::IdentityKeyPair;
 use crate::keys::prekey::{generate_one_time_prekeys, SignedPreKey};
 use crate::keys::ratchet::Ratchet;
-use crate::network::peers::{Network, Peer, PeerId};
+use crate::network::peers::{Network, PeerId};
 use crate::storage::Storage;
 use crate::transport::connection::ConnectionPool;
 use crate::transport::epoch::{run_epoch_loop, EpochFlusher};
@@ -36,6 +36,10 @@ pub struct App {
     pub address_registry: Arc<Mutex<AddressRegistry>>,
     pub available_relays: Arc<Mutex<Vec<NodeInfo>>>,
     noise_private_key: [u8; 32],
+    /// Tracks when we last processed an announce from each peer.
+    /// Used to prevent infinite announce loops: ignore rapid re-announces
+    /// from the same peer within a short window.
+    last_announce_from: std::sync::Mutex<std::collections::HashMap<PeerId, std::time::Instant>>,
 }
 
 impl App {
@@ -94,7 +98,43 @@ impl App {
         let spk = Arc::new(SignedPreKey::generate(&identity, 1));
         let _opks = generate_one_time_prekeys(1, 100);
 
-        let network = Arc::new(Mutex::new(Network::new()));
+        // Load persisted peer table; fall back to empty on any error.
+        let loaded_network = match storage.load_peer_table() {
+            Ok(net) => {
+                if net.peer_count() > 0 {
+                    info!(count = net.peer_count(), "Loaded peer table from disk");
+                }
+                net
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to load peer table, starting with empty table");
+                Network::new()
+            }
+        };
+
+        // Re-attach persisted ratchet state for each loaded peer.
+        // NOTE: Ratchet serialization (Ratchet::from_bytes) is not yet implemented;
+        // this loop is a no-op today and will become active in the next milestone
+        // ("Persist ratchet state after every encrypt/decrypt").
+        {
+            let peer_ids: Vec<PeerId> = loaded_network.list_peers().iter().map(|p| p.peer_id).collect();
+            for peer_id in peer_ids {
+                match storage.load_ratchet(&peer_id) {
+                    Ok(Some(_bytes)) => {
+                        // Ratchet::from_bytes not yet implemented.
+                        // When it is, deserialize and attach here:
+                        //   loaded_network.get_peer_mut(&peer_id).unwrap().ratchet = Some(Ratchet::from_bytes(&bytes)?);
+                        debug!(peer = %crate::utils::hex_encode(&peer_id[..8]), "Ratchet bytes found on disk (serialization pending)");
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(peer = %crate::utils::hex_encode(&peer_id[..8]), error = %e, "Failed to load ratchet, skipping");
+                    }
+                }
+            }
+        }
+
+        let network = Arc::new(Mutex::new(loaded_network));
         // Noise transport key derived from X25519 identity key
         let noise_key = identity.x25519_private_key().to_bytes();
         let connection_pool = Arc::new(ConnectionPool::new(noise_key));
@@ -119,6 +159,7 @@ impl App {
             address_registry,
             available_relays,
             noise_private_key: noise_key,
+            last_announce_from: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -196,7 +237,36 @@ impl App {
             let announce = WireMessage::new(MessageType::PeerAnnounce, self.build_announce());
             match self.connection_pool.send_to(peer_addr, &announce).await {
                 Ok(()) => info!(peer = %peer_addr, "Announced to peer"),
-                Err(e) => warn!(peer = %peer_addr, error = %e, "Failed to announce"),
+                Err(e) => debug!(peer = %peer_addr, error = %e, "Peer not reachable"),
+            }
+        }
+
+        // Re-announce to stored peers so sessions are re-established after restart.
+        // Skip addresses already covered by bootstrap_peers to avoid duplicate announces.
+        {
+            let net = self.network.lock().await;
+            let bootstrap_set: std::collections::HashSet<&str> = self
+                .config
+                .bootstrap_peers
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            let stored_addrs: Vec<String> = net
+                .list_peers()
+                .iter()
+                .filter(|p| !bootstrap_set.contains(p.address.as_str()))
+                .map(|p| p.address.clone())
+                .collect();
+            drop(net);
+
+            for addr in &stored_addrs {
+                let announce = WireMessage::new(MessageType::PeerAnnounce, self.build_announce());
+                match self.connection_pool.send_to(addr, &announce).await {
+                    Ok(()) => {
+                        info!(peer = %addr, "Re-announced to stored peer");
+                    }
+                    Err(e) => debug!(peer = %addr, error = %e, "Stored peer not reachable"),
+                }
             }
         }
 
@@ -244,6 +314,7 @@ impl App {
                                     }
                                     _ = tokio::signal::ctrl_c() => {
                                         info!("Shutting down...");
+                                        self.save_peer_table_on_shutdown().await;
                                         return;
                                     }
                                 }
@@ -300,7 +371,16 @@ impl App {
             }
         }
 
+        self.save_peer_table_on_shutdown().await;
         info!("Shutdown complete");
+    }
+
+    /// Save peer table to storage on shutdown, logging a warning on error.
+    async fn save_peer_table_on_shutdown(&self) {
+        let net = self.network.lock().await;
+        if let Err(e) = self.storage.save_peer_table(&net) {
+            warn!(error = %e, "Failed to save peer table on shutdown");
+        }
     }
 
     /// Handle an incoming delivered message.
@@ -363,53 +443,71 @@ impl App {
         let peer_id: PeerId = x_bytes;
         let short_id = &crate::utils::hex_encode(&peer_id)[..16];
 
-        // Add to network
+        // Add or update peer in the network table.
         let mut net = self.network.lock().await;
         let already_known = net.get_peer(&peer_id).is_some();
+        let had_active_session = already_known
+            && net.get_peer(&peer_id).map(|p| p.ratchet.is_some()).unwrap_or(false);
 
         if !already_known {
-            let _peer = Peer::new(ed_key, x_key, addr.to_string());
-
-            // Deterministic role assignment: higher X25519 public key is initiator
-            let we_are_initiator = self.identity.x25519_public_bytes() > x_bytes;
-
             net.add_peer(ed_key, x_key, addr.to_string());
-            if let Some(p) = net.get_peer_mut(&peer_id) {
-                // Symmetric DH: both sides compute DH(my_identity_priv, peer_identity_pub)
-                // X25519 DH is commutative: DH(a, B) == DH(b, A)
-                let sk = self.identity.x25519_dh(&x_key);
-                debug!(
-                    sk = %crate::utils::hex_encode(&sk[..8]),
-                    is_alice = we_are_initiator,
-                    "Session established"
-                );
-                p.ratchet = Some(Ratchet::init_symmetric(sk, we_are_initiator));
-            }
+        }
 
-            drop(net);
+        // Always (re-)establish the session. An incoming PeerAnnounce means the
+        // peer wants a fresh session — either it just started, or it restarted
+        // and lost its old ratchet. Re-initing is safe because init_symmetric
+        // with the same DH inputs is deterministic.
+        let we_are_initiator = self.identity.x25519_public_bytes() > x_bytes;
+        if let Some(p) = net.get_peer_mut(&peer_id) {
+            let sk = self.identity.x25519_dh(&x_key);
+            debug!(is_alice = we_are_initiator, "Session established");
+            p.ratchet = Some(Ratchet::init_symmetric(sk, we_are_initiator));
+        }
 
-            // Register in address registry
-            {
-                let mut reg = self.address_registry.lock().await;
-                reg.register(&crate::utils::hex_encode(&x_bytes), addr);
-            }
+        drop(net);
 
-            // Add to available relays
-            {
-                let mut relays = self.available_relays.lock().await;
+        // Register in address registry
+        {
+            let mut reg = self.address_registry.lock().await;
+            reg.register(&crate::utils::hex_encode(&x_bytes), addr);
+        }
+
+        // Add to available relays (avoid duplicates)
+        {
+            let mut relays = self.available_relays.lock().await;
+            if !relays.iter().any(|r| r.id == x_bytes) {
                 relays.push(NodeInfo {
                     id: x_bytes,
                     public_key: x_key,
                     address: addr.to_string(),
                 });
             }
+        }
 
+        if had_active_session {
+            println!("[Session re-established: {}... @ {}]", short_id, addr);
+        } else {
             println!("[Peer discovered: {}... @ {}]", short_id, addr);
+        }
 
-            // Announce ourselves back
+        // Announce back, but suppress rapid-fire loops: if we processed an
+        // announce from this same peer within the last 5 seconds, skip the
+        // response. This breaks infinite A↔B announce chains while still
+        // allowing legitimate re-announces after a restart.
+        let should_respond = {
+            let mut last = self.last_announce_from.lock().unwrap();
+            let now = std::time::Instant::now();
+            let recent = last
+                .get(&peer_id)
+                .map(|t| now.duration_since(*t) < std::time::Duration::from_secs(5))
+                .unwrap_or(false);
+            last.insert(peer_id, now);
+            !recent
+        };
+        if should_respond {
             let announce = WireMessage::new(MessageType::PeerAnnounce, self.build_announce());
             if let Err(e) = self.connection_pool.send_to(addr, &announce).await {
-                warn!(error = %e, "Failed to announce back to peer");
+                debug!(error = %e, "Failed to announce back to peer");
             }
         }
     }
@@ -518,18 +616,33 @@ impl App {
         payload.extend_from_slice(&ciphertext);
 
         let wire_msg = WireMessage::new(MessageType::DirectMessage, payload);
-        self.connection_pool
-            .send_to(&peer_addr, &wire_msg)
-            .await
-            .map_err(|e| format!("Send failed: {}", e))?;
-
-        // Persist
-        let _ = self.storage.append_message(&target_id, text.as_bytes());
-
-        let short = &crate::utils::hex_encode(&target_id)[..16];
-        println!("[sent to {}...]", short);
-
-        Ok(())
+        match self.connection_pool.send_to(&peer_addr, &wire_msg).await {
+            Ok(()) => {
+                let _ = self.storage.append_message(&target_id, text.as_bytes());
+                let short = &crate::utils::hex_encode(&target_id)[..16];
+                println!("[sent to {}...]", short);
+                Ok(())
+            }
+            Err(e) => {
+                let short = &crate::utils::hex_encode(&target_id)[..16];
+                // Connection refused / reset / timeout are expected when a peer is offline.
+                let reason = match &e {
+                    crate::transport::wire::WireError::Io(io_err)
+                        if io_err.kind() == std::io::ErrorKind::ConnectionRefused =>
+                    {
+                        format!("Peer {}... is offline", short)
+                    }
+                    crate::transport::wire::WireError::Io(io_err)
+                        if io_err.kind() == std::io::ErrorKind::TimedOut
+                            || io_err.kind() == std::io::ErrorKind::ConnectionReset =>
+                    {
+                        format!("Peer {}... is unreachable", short)
+                    }
+                    _ => format!("{}", e),
+                };
+                Err(reason)
+            }
+        }
     }
 
     /// Get the node's public identity as hex string.

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::transport::wire::{WireError, WireMessage};
 
@@ -222,7 +222,7 @@ impl ConnectionPool {
             match noise_send(&mut nc.stream, &mut nc.transport, msg).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    warn!(error = %e, "Noise connection failed, reconnecting");
+                    debug!(error = %e, "Noise connection closed, reconnecting");
                     conns.remove(addr);
                 }
             }

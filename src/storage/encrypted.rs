@@ -295,6 +295,29 @@ impl Storage {
         Ok(())
     }
 
+    /// Save the peer table to encrypted storage as `peers.enc`.
+    ///
+    /// Ratchet state is not included in the peer table; it is stored per-peer separately.
+    pub fn save_peer_table(
+        &self,
+        network: &crate::network::peers::Network,
+    ) -> Result<(), StorageError> {
+        let bytes = network.to_bytes();
+        self.save_encrypted("peers.enc", &bytes)
+    }
+
+    /// Load the peer table from encrypted storage.
+    ///
+    /// Returns an empty `Network` if `peers.enc` does not exist.
+    /// Returns `Err(StorageError::CorruptedData)` if decryption or deserialization fails.
+    pub fn load_peer_table(&self) -> Result<crate::network::peers::Network, StorageError> {
+        match self.load_encrypted("peers.enc")? {
+            None => Ok(crate::network::peers::Network::new()),
+            Some(bytes) => crate::network::peers::Network::from_bytes(&bytes)
+                .map_err(|_| StorageError::CorruptedData),
+        }
+    }
+
     /// Load all messages for a peer, decrypting each with the storage key.
     pub fn load_messages(&self, peer_id: &[u8; 32]) -> Result<Vec<Vec<u8>>, StorageError> {
         let filename = format!("{}.msglog", hex_encode(peer_id));
@@ -533,6 +556,56 @@ mod tests {
         fs::write(dir.join("identity.enc"), b"not valid data").unwrap();
         let result = Storage::load_identity_keypair(&dir, b"pw");
         assert!(result.is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_save_load_peer_table_roundtrip() {
+        use crate::keys::identity::IdentityKeyPair;
+        use crate::network::peers::Network;
+
+        let dir = temp_dir();
+        let storage = Storage::with_key([1u8; 32], &dir);
+
+        let mut net = Network::new();
+        let id1 = IdentityKeyPair::generate();
+        let id2 = IdentityKeyPair::generate();
+        net.add_peer(*id1.ed25519_public(), *id1.x25519_public(), "host1:8080".into());
+        net.add_peer(*id2.ed25519_public(), *id2.x25519_public(), "host2:9090".into());
+
+        storage.save_peer_table(&net).unwrap();
+        let loaded = storage.load_peer_table().unwrap();
+
+        assert_eq!(loaded.peer_count(), 2);
+        let p1 = loaded.get_peer(&id1.x25519_public_bytes()).unwrap();
+        assert_eq!(p1.address, "host1:8080");
+        let p2 = loaded.get_peer(&id2.x25519_public_bytes()).unwrap();
+        assert_eq!(p2.address, "host2:9090");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_load_peer_table_missing_file() {
+        let dir = temp_dir();
+        let storage = Storage::with_key([1u8; 32], &dir);
+
+        let loaded = storage.load_peer_table().unwrap();
+        assert_eq!(loaded.peer_count(), 0);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_load_peer_table_tampered() {
+        let dir = temp_dir();
+        let storage = Storage::with_key([1u8; 32], &dir);
+
+        // Write garbage that cannot decrypt or parse correctly
+        fs::write(dir.join("peers.enc"), b"this is not valid encrypted data").unwrap();
+        let result = storage.load_peer_table();
+        assert!(result.is_err());
+
         fs::remove_dir_all(&dir).ok();
     }
 }

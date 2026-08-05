@@ -65,7 +65,26 @@ pub async fn run_relay(
     prekey_store: Arc<Mutex<PreKeyStore>>,
     address_registry: Arc<Mutex<AddressRegistry>>,
 ) -> Result<(), WireError> {
-    let listener = TcpListener::bind(listen_addr).await?;
+    // Retry bind a few times in case the port is still in TIME_WAIT from a
+    // previous run. This avoids "Address already in use" on quick restarts.
+    let listener = {
+        let mut attempts = 0u32;
+        loop {
+            match TcpListener::bind(listen_addr).await {
+                Ok(l) => break l,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempts < 5 => {
+                    attempts += 1;
+                    warn!(
+                        addr = listen_addr,
+                        attempt = attempts,
+                        "Address in use, retrying in 1s"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => return Err(WireError::Io(e)),
+            }
+        }
+    };
     info!(addr = listen_addr, "Relay listener started");
 
     loop {
@@ -93,9 +112,16 @@ pub async fn run_relay(
             )
             .await
             {
-                match e {
+                match &e {
                     WireError::UnexpectedEof => {
-                        debug!(peer = %peer_addr, "Connection closed");
+                        debug!(peer = %peer_addr, "Peer disconnected");
+                    }
+                    WireError::Io(io_err)
+                        if io_err.kind() == std::io::ErrorKind::BrokenPipe
+                            || io_err.kind() == std::io::ErrorKind::ConnectionReset
+                            || io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
+                    {
+                        debug!(peer = %peer_addr, "Peer disconnected");
                     }
                     _ => {
                         warn!(peer = %peer_addr, error = %e, "Connection handler error");
