@@ -63,7 +63,7 @@ What exists today.
 Nodes survive restarts.
 
 - [x] Save identity keypair on first run, reload on subsequent starts
-- [ ] Save and reload peer table on shutdown/startup
+- [x] Save and reload peer table on shutdown/startup
 - [ ] Persist ratchet state after every encrypt/decrypt
 - [ ] Persist signed pre-key and OPK pool
 - [ ] Detect corrupted storage and force re-keying rather than
